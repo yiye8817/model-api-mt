@@ -1,0 +1,456 @@
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { Terminal as TerminalIcon, X, Maximize2, Trash2, Square, MessageCircle } from 'lucide-react';
+import type { TerminalLine } from '../types';
+import 'xterm/css/xterm.css';
+
+const ANSI_FG: Record<number, string> = {
+  30: 'text-gray-400', 31: 'text-red-400', 32: 'text-green-400', 33: 'text-yellow-400',
+  34: 'text-blue-400', 35: 'text-purple-400', 36: 'text-cyan-400', 37: 'text-gray-200',
+  90: 'text-gray-500', 91: 'text-red-500', 92: 'text-green-500', 93: 'text-yellow-500',
+  94: 'text-blue-500', 95: 'text-purple-500', 96: 'text-cyan-500', 97: 'text-gray-300',
+};
+function parseAnsiToSpans(raw: string): { text: string; className: string }[] {
+  const out: { text: string; className: string }[] = [];
+  const re = /\x1b\[([0-9;]*)m/g;
+  let lastIdx = 0;
+  let currentClass = '';
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    if (m.index > lastIdx) out.push({ text: raw.slice(lastIdx, m.index), className: currentClass });
+    lastIdx = m.index + m[0].length;
+    const codes = m[1].split(';').map(Number).filter(Boolean);
+    for (const c of codes) {
+      if (c === 0) currentClass = '';
+      else if (ANSI_FG[c]) currentClass = ANSI_FG[c];
+    }
+  }
+  if (lastIdx < raw.length) out.push({ text: raw.slice(lastIdx), className: currentClass });
+  return out.length ? out : [{ text: raw, className: '' }];
+}
+
+interface Props {
+  visible: boolean;
+  onClose: () => void;
+  onSendToChat?: (text: string) => void;
+}
+
+export default function Terminal({ visible, onClose, onSendToChat }: Props) {
+  const [wsAvailable, setWsAvailable] = useState<boolean | null>(null);
+  const [lines, setLines] = useState<TerminalLine[]>([
+    { id: 'welcome', type: 'system', content: '🖥️  Terminal ready. Type commands and press Enter to execute.\n   Type "help" for available commands. Type "clear" to clear screen.', timestamp: Date.now() },
+  ]);
+  const [input, setInput] = useState('');
+  const [isRunning, setIsRunning] = useState(false);
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIdx, setHistoryIdx] = useState(-1);
+  const [maximized, setMaximized] = useState(false);
+  const [cwd, setCwd] = useState('~');
+  const [wsConnected, setWsConnected] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const outputRef = useRef<HTMLDivElement>(null);
+  const lastSelectionRef = useRef<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<{ term: any; fitAddon: any } | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    if (wsAvailable === null) {
+      fetch('/api/terminal-ws-available')
+        .then(r => r.json())
+        .then(d => setWsAvailable(!!d?.available))
+        .catch(() => setWsAvailable(false));
+    }
+  }, [visible, wsAvailable]);
+
+  useEffect(() => {
+    if (!visible || wsAvailable !== true || !containerRef.current) return;
+    let ws: WebSocket | null = null;
+    const init = async () => {
+      const [xtermMod, fitMod] = await Promise.all([
+        import('xterm'),
+        import('xterm-addon-fit'),
+      ]);
+      const Terminal = xtermMod.Terminal;
+      const FitAddon = (fitMod as any).FitAddon ?? (fitMod as any).default;
+      const term = new Terminal({
+        fontFamily: 'ui-monospace, "Cascadia Code", "JetBrains Mono", monospace',
+        fontSize: 13,
+        lineHeight: 1.35,
+        cursorBlink: true,
+        cursorStyle: 'block',
+        scrollback: 10000,
+        theme: {
+          background: '#0f172a',
+          foreground: '#e2e8f0',
+          cursor: '#4ade80',
+          cursorAccent: '#0f172a',
+          selectionBackground: 'rgba(74, 222, 128, 0.2)',
+          black: '#1e293b',
+          red: '#f87171',
+          green: '#4ade80',
+          yellow: '#facc15',
+          blue: '#60a5fa',
+          magenta: '#c084fc',
+          cyan: '#22d3ee',
+          white: '#e2e8f0',
+          brightBlack: '#64748b',
+          brightRed: '#fca5a5',
+          brightGreen: '#86efac',
+          brightYellow: '#fde047',
+          brightBlue: '#93c5fd',
+          brightMagenta: '#d8b4fe',
+          brightCyan: '#67e8f9',
+          brightWhite: '#f8fafc',
+        },
+      });
+      const fitAddon = new FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(containerRef.current!);
+      fitAddon.fit();
+      termRef.current = { term, fitAddon };
+
+      const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws';
+      ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        setWsConnected(true);
+        const { cols, rows } = term;
+        ws!.send(JSON.stringify({ type: 'resize', cols, rows }));
+      };
+      ws.onmessage = (e: MessageEvent) => {
+        if (e.data instanceof ArrayBuffer) {
+          term.write(new TextDecoder().decode(new Uint8Array(e.data)));
+        } else if (typeof e.data === 'string') {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'pong') return;
+          } catch {
+            // ignore
+          }
+          term.write(e.data);
+        }
+      };
+      ws.onclose = () => setWsConnected(false);
+      ws.onerror = () => setWsConnected(false);
+
+      term.onData((data: string) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'input', data }));
+        }
+      });
+      term.onResize(({ cols, rows }: { cols: number; rows: number }) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+        }
+      });
+
+      const ro = new ResizeObserver(() => {
+        try {
+          fitAddon.fit();
+        } catch {
+          // ignore
+        }
+      });
+      ro.observe(containerRef.current!);
+      return () => {
+        ro.disconnect();
+      };
+    };
+    let cleanup: (() => void) | undefined;
+    init().then(c => {
+      cleanup = c;
+    });
+    return () => {
+      if (ws) {
+        ws.close();
+        wsRef.current = null;
+      }
+      if (termRef.current) {
+        termRef.current.term.dispose();
+        termRef.current = null;
+      }
+      cleanup?.();
+    };
+  }, [visible, wsAvailable]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [lines]);
+
+  useEffect(() => {
+    if (visible && wsAvailable !== true) inputRef.current?.focus();
+  }, [visible, wsAvailable]);
+
+  const addLine = useCallback((type: TerminalLine['type'], content: string) => {
+    setLines(prev => [...prev, { id: crypto.randomUUID(), type, content, timestamp: Date.now() }]);
+  }, []);
+
+  const handleSubmit = useCallback(async () => {
+    const cmd = input.trim();
+    if (!cmd) return;
+    setHistory(prev => [...prev.filter(h => h !== cmd), cmd]);
+    setHistoryIdx(-1);
+    setInput('');
+    addLine('input', `$ ${cmd}`);
+    if (cmd === 'clear') {
+      setLines([]);
+      return;
+    }
+    if (cmd === 'help') {
+      addLine('system', 'Available features:\n  • Type any shell command to execute it\n  • "clear" - clear terminal\n  • "cd <dir>" - change directory\n  • Up/Down arrows - command history');
+      return;
+    }
+    setIsRunning(true);
+    abortRef.current = new AbortController();
+    try {
+      const resp = await fetch('/api/terminal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd, cwd }),
+        signal: abortRef.current.signal,
+      });
+      const contentType = resp.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream')) {
+        const reader = resp.body?.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let streamDone = false;
+        if (reader) {
+          while (!streamDone) {
+            const { done, value } = await reader.read();
+            if (value) buffer += decoder.decode(value, { stream: true });
+            let lineEnd: number;
+            while ((lineEnd = buffer.indexOf('\n')) !== -1) {
+              const line = buffer.slice(0, lineEnd).trim();
+              buffer = buffer.slice(lineEnd + 1);
+              if (!line.startsWith('data: ')) continue;
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.out != null) addLine('output', data.out.replace(/\n$/, ''));
+                if (data.error) addLine('error', data.error);
+                if (data.exit != null) {
+                  if (data.cwd) setCwd(data.cwd);
+                  streamDone = true;
+                  break;
+                }
+              } catch {
+                // skip
+              }
+            }
+            if (done) break;
+          }
+        }
+      } else {
+        const data = await resp.json();
+        if (data.cwd) setCwd(data.cwd);
+        if (data.stdout) addLine('output', data.stdout);
+        if (data.stderr) addLine('error', data.stderr);
+        if (data.error) addLine('error', data.error);
+        if (!data.stdout && !data.stderr && !data.error && data.exit_code === 0) {
+          addLine('output', '(completed successfully, no output)');
+        }
+      }
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        addLine('error', `Connection error: ${e.message}\nMake sure the Python backend is running.`);
+      }
+    } finally {
+      setIsRunning(false);
+      abortRef.current = null;
+    }
+  }, [input, cwd, addLine]);
+
+  const handleStop = useCallback(() => {
+    if (abortRef.current) abortRef.current.abort();
+    fetch('/api/terminal-cancel', { method: 'POST' }).catch(() => {});
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleSubmit();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (history.length === 0) return;
+      const newIdx = historyIdx < history.length - 1 ? historyIdx + 1 : historyIdx;
+      setHistoryIdx(newIdx);
+      setInput(history[history.length - 1 - newIdx] || '');
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIdx <= 0) {
+        setHistoryIdx(-1);
+        setInput('');
+      } else {
+        const newIdx = historyIdx - 1;
+        setHistoryIdx(newIdx);
+        setInput(history[history.length - 1 - newIdx] || '');
+      }
+    } else if (e.key === 'c' && e.ctrlKey) {
+      if (isRunning) {
+        addLine('system', '^C');
+        handleStop();
+      }
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      handleTabComplete();
+    }
+  };
+
+  const handleTabComplete = useCallback(async () => {
+    if (!input.trim()) return;
+    try {
+      const res = await fetch('/api/terminal-complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line: input, cwd }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const comps = data.completions || [];
+      if (comps.length === 0) return;
+      const words = input.split(/\s+/);
+      const last = words[words.length - 1] || '';
+      const base = last.replace(/[^/]*$/, '');
+      const repl = comps.length === 1 ? comps[0] : comps[0].slice(0, commonPrefixLen(comps));
+      setInput(input.slice(0, -last.length) + base + repl);
+    } catch {
+      // ignore
+    }
+  }, [input, cwd]);
+
+  function commonPrefixLen(arr: string[]): number {
+    if (arr.length <= 1) return arr[0]?.length ?? 0;
+    let i = 0;
+    while (i < arr[0].length && arr.every(s => s[i] === arr[0][i])) i++;
+    return i;
+  }
+
+  const handleClear = useCallback(() => {
+    if (termRef.current) {
+      termRef.current.term.clear();
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'input', data: '\x0c' }));
+      }
+    } else {
+      setLines([]);
+    }
+  }, []);
+
+  const handleCopySelection = useCallback(() => {
+    if (termRef.current?.term.hasSelection()) {
+      const text = termRef.current.term.getSelection();
+      if (text && onSendToChat) onSendToChat(text);
+    } else {
+      const s = lastSelectionRef.current ?? window.getSelection()?.toString().trim();
+      lastSelectionRef.current = null;
+      if (s && onSendToChat) onSendToChat(s);
+    }
+  }, [onSendToChat]);
+
+  if (!visible) return null;
+
+  const useWsTerminal = wsAvailable === true;
+  const statusLabel = useWsTerminal ? (wsConnected ? '已连接' : '连接中...') : (isRunning ? 'Running...' : 'Ready');
+
+  return (
+    <div
+      className={`flex flex-col bg-gray-950 border-t border-gray-700 ${maximized ? 'fixed inset-0 z-50' : 'h-80'}`}
+      onClick={e => {
+        if (outputRef.current?.contains(e.target as Node)) return;
+        if (!useWsTerminal) inputRef.current?.focus();
+        else termRef.current?.term.focus();
+      }}
+    >
+      <div className="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-700 shrink-0 cursor-default select-none">
+        <div className="flex items-center gap-2 text-sm text-gray-300">
+          <TerminalIcon size={14} className="text-green-400" />
+          <span className="font-medium">Terminal</span>
+          {useWsTerminal && (
+            <span className={`text-xs font-mono ${wsConnected ? 'text-green-400' : 'text-yellow-400'}`}>
+              {statusLabel}
+            </span>
+          )}
+          {!useWsTerminal && <span className="text-gray-500 text-xs font-mono ml-2">{cwd}</span>}
+        </div>
+        <div className="flex items-center gap-1">
+          {onSendToChat && (
+            <button
+              onMouseDown={e => {
+                lastSelectionRef.current = window.getSelection()?.toString().trim() || null;
+                e.preventDefault();
+              }}
+              onClick={handleCopySelection}
+              className="p-1.5 hover:bg-gray-800 rounded text-gray-500 hover:text-white"
+              title="将选中内容发送到对话"
+            >
+              <MessageCircle size={13} />
+            </button>
+          )}
+          {!useWsTerminal && isRunning && (
+            <button onClick={handleStop} className="p-1.5 hover:bg-red-900/50 rounded text-red-400 hover:text-red-300" title="终止">
+              <Square size={13} />
+            </button>
+          )}
+          <button onClick={handleClear} className="p-1.5 hover:bg-gray-800 rounded text-gray-500 hover:text-white" title="Clear">
+            <Trash2 size={13} />
+          </button>
+          <button onClick={() => setMaximized(!maximized)} className="p-1.5 hover:bg-gray-800 rounded text-gray-500 hover:text-white" title={maximized ? 'Restore' : 'Maximize'}>
+            <Maximize2 size={13} />
+          </button>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-800 rounded text-gray-500 hover:text-red-400" title="Close">
+            <X size={13} />
+          </button>
+        </div>
+      </div>
+
+      {useWsTerminal ? (
+        <div ref={containerRef} className="flex-1 min-h-0 w-full p-2" style={{ minHeight: 200 }} />
+      ) : (
+        <>
+          <div ref={outputRef} className="flex-1 overflow-y-auto px-4 py-2 font-mono text-sm select-text">
+            {lines.map(line => (
+              <div key={line.id} className="mb-0.5">
+                {line.type === 'input' && <span className="text-green-400 whitespace-pre-wrap">{line.content}</span>}
+                {line.type === 'output' && (
+                  <span className="whitespace-pre-wrap">
+                    {parseAnsiToSpans(line.content).map((seg, i) => (
+                      <span key={i} className={seg.className || 'text-gray-300'}>{seg.text}</span>
+                    ))}
+                  </span>
+                )}
+                {line.type === 'error' && (
+                  <span className="whitespace-pre-wrap">
+                    {parseAnsiToSpans(line.content).map((seg, i) => (
+                      <span key={i} className={seg.className || 'text-red-400'}>{seg.text}</span>
+                    ))}
+                  </span>
+                )}
+                {line.type === 'system' && <span className="text-blue-400 whitespace-pre-wrap">{line.content}</span>}
+              </div>
+            ))}
+            {isRunning && <div className="text-yellow-400 animate-pulse">Running...</div>}
+            <div ref={bottomRef} />
+          </div>
+          <div className="flex items-center gap-2 px-4 py-2 border-t border-gray-800 shrink-0 bg-gray-900/50">
+            <span className="text-green-400 font-mono text-sm shrink-0">$</span>
+            <input
+              ref={inputRef}
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={isRunning}
+              placeholder="Enter command..."
+              className="flex-1 bg-transparent text-white font-mono text-sm outline-none placeholder-gray-600 disabled:opacity-50"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,10 @@
+# Core (required)
+flask>=3.0.0
+requests>=2.31.0
+
+# Optional: WebSocket PTY terminal (/ws) for xterm-style real terminal
+# Only available on Unix-like systems (uses pty module)
+flask-sock>=0.7.0
+
+# Optional: 联网搜索 (Web search via DuckDuckGo) for /api/web-search
+duckduckgo-search>=6.0.0

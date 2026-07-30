@@ -1,0 +1,50 @@
+# Dependencies and virtual environments
+node_modules/
+.venv/
+.venv-run/
+
+# Build artifacts and packaged releases
+dist/
+release/
+*.tar.gz
+*.tgz
+*.zip
+
+# Python, test, and tool caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.vite/
+.vite-temp/
+
+# Runtime state (may contain credentials or user data)
+data/
+workspace/
+plugins/
+logs/
+*.log
+*.pid
+.sudo_pass
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editor, OS, and temporary files
+.DS_Store
+*.swp
+*.swo
+*.bak
+*.bak.*
+
+# Local experiments and superseded standalone project
+t.py
+terminal.html
+terminal_server.py
+docs/
+deepseek-plugin-conversation-feature16/
