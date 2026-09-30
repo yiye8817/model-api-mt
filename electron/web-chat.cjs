@@ -1032,8 +1032,12 @@ async function runWebChat(view, prompt, options = {}) {
   const emit = (event, message, details = {}) => {
     try { options.onProgress?.(event, message, details); } catch { /* progress is best effort */ }
   };
+  const checkAborted = () => {
+    if (options.signal?.aborted) throw new Error('网页项目流程已停止');
+  };
 
   try {
+    checkAborted();
     const before = await readState(webContents, site, cleanPrompt);
     const prepared = await webContents.executeJavaScript(
       scriptCall(preparePromptInPage, cleanPrompt), true,
@@ -1042,6 +1046,7 @@ async function runWebChat(view, prompt, options = {}) {
       return { ok: false, site, title, url, error: prepared?.error || '无法填写问题' };
     }
     await sleep(350);
+    checkAborted();
     const submitted = await webContents.executeJavaScript(scriptCall(submitPromptInPage), true);
     if (!submitted?.ok) {
       emit('prompt-failed', '问题发送失败', { error: submitted?.error || '无法发送问题' });
@@ -1104,7 +1109,9 @@ async function runWebChat(view, prompt, options = {}) {
       };
     };
     while (Date.now() - startedAt < timeoutMs) {
+      checkAborted();
       await sleep(500);
+      checkAborted();
       const state = await readState(webContents, site, cleanPrompt);
       lastState = state;
       if (state?.model) detectedModel = String(state.model).trim();
@@ -1125,6 +1132,7 @@ async function runWebChat(view, prompt, options = {}) {
         ? Math.max(500, Math.min(30000, forcedStableMs))
         : (latest.length < 120 ? 15000 : 8000);
       if (!state?.busy && latest && Date.now() - stableSince >= settleMs) {
+        checkAborted();
         // 对已知站点，复制按钮是回答完成渲染的最终信号。按钮未出现时继续等待。
         if ((site === 'deepseek' || site === 'chatgpt') && state?.copyReady !== true) continue;
         // 回答信号完成后继续等待实际布局与 innerText 跨帧稳定。
@@ -1159,6 +1167,7 @@ async function runWebChat(view, prompt, options = {}) {
           );
         }
         const copied = await copyLatestAnswerMarkdown(webContents, site, emit);
+        checkAborted();
         extraction = {
           ok: !!copied?.ok,
           source: copied?.ok ? 'copy-button' : 'dom',
@@ -1213,6 +1222,7 @@ async function runWebChat(view, prompt, options = {}) {
     }
 
     // 超时边界再读取一次，避免漏掉恰好在最后一个轮询周期完成的正文。
+    checkAborted();
     emit('response-timeout', '等待网页回复完成超时，执行最终页面校验');
     const finalState = await readState(webContents, site, cleanPrompt).catch(() => lastState);
     let finalRenderState = null;
@@ -1326,6 +1336,7 @@ async function startNewWebChat(view) {
 module.exports = {
   detectSite,
   runWebChat,
+  copyLatestAnswerMarkdown,
   startNewWebChat,
   __test: { readChatStateInPage, copyLatestAnswerMarkdown },
 };

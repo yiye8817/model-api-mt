@@ -5545,6 +5545,19 @@ def _project_run_sh(language, entry, run_cmd, deps):
             'echo "==> 运行"',
             'exec ./.project-bin',
         ]
+    elif lang == 'java':
+        class_name = os.path.splitext(os.path.basename(entry))[0] or 'Main'
+        body += [
+            'echo "==> 编译 Java"',
+            'mkdir -p .project-classes',
+            f'javac -d .project-classes {shlex.quote(entry)}',
+            'echo "==> 运行"',
+            f'exec java -cp .project-classes {shlex.quote(class_name)}',
+        ]
+    elif lang == 'html':
+        body += [
+            'echo "==> HTML 项目文件已生成，可在网页预览"',
+        ]
     else:
         # Java and unusual project layouts may need package-specific commands;
         # keep the model-provided command for those cases.
@@ -5634,6 +5647,196 @@ def _render_project_files(files, per_file=3000):
             continue
         out.append(f"--- {p} ---\n{c[:per_file]}")
     return "\n\n".join(out) if out else "(无文件)"
+
+
+_MARKDOWN_PROJECT_LANGS = {
+    'python': 'python', 'py': 'python', 'python3': 'python',
+    'javascript': 'node', 'js': 'node', 'node': 'node',
+    'typescript': 'node', 'ts': 'node',
+    'bash': 'bash', 'sh': 'bash', 'shell': 'bash', 'zsh': 'bash',
+    'c': 'c', 'cpp': 'cpp', 'c++': 'cpp', 'cxx': 'cpp',
+    'java': 'java', 'go': 'go', 'golang': 'go',
+    'rust': 'rust', 'rs': 'rust', 'ruby': 'ruby', 'rb': 'ruby',
+    'php': 'php', 'html': 'html', 'htm': 'html',
+}
+
+
+def _markdown_file_path(value):
+    """Extract a relative file path from a Markdown heading/fence hint."""
+    text = str(value or '').strip().strip('`*')
+    text = re.sub(r'\s+$', '', text)
+    match = re.search(
+        r'(?:file(?:name)?|path|文件(?:名|路径)?|文件)\s*[:=：]\s*[`"\']?([^`"\'\s]+)',
+        text, re.I,
+    )
+    if match:
+        text = match.group(1)
+    else:
+        # "## src/main.py" and "```python src/main.py" are common formats.
+        candidates = re.findall(r'[`]?([A-Za-z0-9_.][A-Za-z0-9_.\-/\\]*\.[A-Za-z0-9]+)[`]?', text)
+        if candidates:
+            text = candidates[-1]
+        else:
+            tokens = text.split()
+            text = tokens[-1] if len(tokens) > 1 else ''
+    text = text.strip().strip('`"\'').replace('\\', '/')
+    if not text or text.startswith(('http://', 'https://')):
+        return ''
+    norm = os.path.normpath(text)
+    if os.path.isabs(norm) or norm == '..' or norm.startswith('../'):
+        return ''
+    return norm
+
+
+def _markdown_project_files(markdown):
+    """Parse fenced Markdown code blocks into a safe multi-file project."""
+    source = str(markdown or '')
+    fence_re = re.compile(r'```[ \t]*([^\n`]*)\n([\s\S]*?)```', re.M)
+    files = []
+    used = set()
+    language_counts = {}
+    run_cmd = ''
+    metadata = {}
+    for line in source.splitlines():
+        command_match = re.match(
+            r'^\s*(?:run(?:ning)?\s+command|run_cmd|运行命令|启动命令)\s*[:：]\s*`?(.+?)`?\s*$',
+            line, re.I,
+        )
+        if command_match and not run_cmd:
+            run_cmd = command_match.group(1).strip().strip('`')
+
+    for index, match in enumerate(fence_re.finditer(source)):
+        info = (match.group(1) or '').strip()
+        content = match.group(2).rstrip('\n') + '\n'
+        tokens = info.split()
+        raw_lang = tokens[0].strip().lower() if tokens else ''
+        if raw_lang in ('workbench-project', 'workbench_config', 'project-config', 'project-config.json'):
+            try:
+                candidate = json.loads(match.group(2).strip())
+                if isinstance(candidate, dict):
+                    metadata.update(candidate)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            continue
+        language = _MARKDOWN_PROJECT_LANGS.get(raw_lang, '')
+        path = _markdown_file_path(info)
+        before = source[:match.start()].splitlines()
+        if not path:
+            for heading in reversed(before[-20:]):
+                if re.match(r'^\s*#{1,6}\s+', heading):
+                    path = _markdown_file_path(re.sub(r'^\s*#{1,6}\s+', '', heading))
+                    if path:
+                        break
+        if not path:
+            first_lines = '\n'.join(content.splitlines()[:3])
+            comment_match = re.search(
+                r'(?:file(?:name)?|path|文件(?:名|路径)?|文件)\s*[:=：]\s*[`"\']?([^`"\'\s]+)',
+                first_lines, re.I,
+            )
+            path = _markdown_file_path(comment_match.group(1)) if comment_match else ''
+        if not language and path:
+            language = _MARKDOWN_PROJECT_LANGS.get(path.rsplit('.', 1)[-1].lower(), '')
+        if not language:
+            language = 'python' if re.search(r'(^|\n)\s*(?:def |import |from )', content) else 'bash'
+        if not path:
+            ext = {
+                'python': 'py', 'node': 'js', 'bash': 'sh', 'c': 'c', 'cpp': 'cpp',
+                'java': 'java', 'go': 'go', 'rust': 'rs', 'ruby': 'rb', 'php': 'php', 'html': 'html',
+            }.get(language, 'txt')
+            path = ('main' if index == 0 else f'block_{index}') + '.' + ext
+        if path in used:
+            stem, dot, ext = path.rpartition('.')
+            suffix = 2
+            candidate = path
+            while candidate in used:
+                candidate = f'{stem}_{suffix}{dot}{ext}' if dot else f'{path}_{suffix}'
+                suffix += 1
+            path = candidate
+        used.add(path)
+        files.append({'path': path, 'content': content})
+        language_counts[language] = language_counts.get(language, 0) + 1
+
+    metadata_language = _MARKDOWN_PROJECT_LANGS.get(str(metadata.get('language') or '').strip().lower(), '')
+    language = metadata_language or (max(language_counts, key=language_counts.get) if language_counts else 'python')
+    entry_names = ('main.py', 'app.py', 'index.js', 'main.js', 'main.go', 'main.c',
+                   'main.cpp', 'main.rs', 'Main.java', 'index.html')
+    metadata_entry = _markdown_file_path(metadata.get('entry'))
+    file_paths = {item['path'] for item in files}
+    entry = metadata_entry if metadata_entry in file_paths else next(
+        (item['path'] for item in files if os.path.basename(item['path']) in entry_names),
+        files[0]['path'] if files else '',
+    )
+    metadata_run_cmd = str(metadata.get('run_cmd') or '').strip()
+    metadata_deps = metadata.get('deps') or metadata.get('dependencies') or []
+    deps = [str(item).strip() for item in metadata_deps if str(item).strip()] if isinstance(metadata_deps, list) else []
+    return {
+        'language': language, 'files': files, 'entry': entry,
+        'run_cmd': metadata_run_cmd or run_cmd, 'deps': deps,
+        'summary': str(metadata.get('summary') or '从网页模型生成的 Markdown 项目'),
+    }
+
+
+@app.route('/api/markdown-project', methods=['POST'])
+def markdown_project():
+    """保存网页模型返回的 Markdown，并解析成可运行的多文件项目。"""
+    data = request.json or {}
+    markdown = str(data.get('markdown') or data.get('content') or '')
+    goal = str(data.get('goal') or 'web_project').strip()
+    slug_hint = str(data.get('slug') or '').strip() or None
+    if slug_hint and (os.path.sep in slug_hint or (os.path.altsep and os.path.altsep in slug_hint) or slug_hint in ('.', '..') or not re.match(r'^[A-Za-z0-9._-]+$', slug_hint)):
+        return jsonify({'error': 'invalid project slug'}), 400
+    if not markdown.strip():
+        return jsonify({'error': 'markdown required'}), 400
+    parsed = _markdown_project_files(markdown)
+    if not parsed['files']:
+        return jsonify({'error': 'Markdown 中没有识别到 fenced code 文件块'}), 422
+    result = _materialize_project(parsed, goal, slug=slug_hint)
+    if 'error' in result:
+        return jsonify(result), 400
+    markdown_name = f'{result["slug"]}.md'
+    markdown_path = os.path.join(WORKSPACE_DIR, 'projects', markdown_name)
+    try:
+        with open(markdown_path, 'w', encoding='utf-8') as handle:
+            handle.write(markdown)
+        result['markdown_file'] = markdown_path
+    except Exception as exc:
+        logger.warning('markdown-project save error: %s', exc)
+    result['parsed_from_markdown'] = True
+    return jsonify(result)
+
+
+@app.route('/api/run-project', methods=['POST'])
+def run_project():
+    """运行已由 Markdown 解析并落盘的工程。"""
+    data = request.json or {}
+    slug = str(data.get('slug') or '').strip()
+    if not slug or '/' in slug or '\\' in slug or slug in ('.', '..'):
+        return jsonify({'error': 'valid project slug required'}), 400
+    projects_root = os.path.realpath(os.path.join(WORKSPACE_DIR, 'projects'))
+    project_dir = os.path.realpath(os.path.join(projects_root, slug))
+    if os.path.commonpath([projects_root, project_dir]) != projects_root or not os.path.isdir(project_dir):
+        return jsonify({'error': 'project not found'}), 404
+    run_path = os.path.join(project_dir, 'run.sh')
+    if not os.path.isfile(run_path):
+        return jsonify({'error': '项目缺少 run.sh'}), 400
+    try:
+        process = subprocess.run(
+            ['bash', run_path], cwd=project_dir, capture_output=True, text=True,
+            timeout=max(10, min(300, int(data.get('timeoutSeconds') or 120))),
+            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+        )
+        output = process.stdout or ''
+        if process.stderr:
+            output += ('\n' if output else '') + process.stderr
+        return jsonify({
+            'slug': slug, 'output': output, 'exit_code': process.returncode,
+            'error': process.stderr if process.returncode else None,
+        }), (200 if process.returncode == 0 else 400)
+    except subprocess.TimeoutExpired:
+        return jsonify({'slug': slug, 'output': '', 'exit_code': 124, 'error': '项目运行超时'}), 400
+    except Exception as exc:
+        logger.exception('run-project failed')
+        return jsonify({'slug': slug, 'output': '', 'exit_code': 1, 'error': str(exc)}), 500
 
 
 @app.route('/api/agent/project', methods=['POST'])

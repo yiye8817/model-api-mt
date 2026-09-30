@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('desktop', {
   extractWebSegments: (id) => ipcRenderer.invoke('desktop:extract-web-segments', { id }),
   applyWebTranslations: (id, mode, translations) => ipcRenderer.invoke('desktop:apply-web-translations', { id, mode, translations }),
   webChat: (id, prompt, timeoutMs) => ipcRenderer.invoke('desktop:web-chat', { id, prompt, timeoutMs }),
+  openWebProjectWizard: (id) => ipcRenderer.invoke('desktop:open-web-project-wizard', { id }),
   onWebChatProgress: (callback) => {
     const handler = (_event, progress) => callback(progress);
     ipcRenderer.on('desktop:web-chat-progress', handler);

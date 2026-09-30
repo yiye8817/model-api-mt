@@ -5,4 +5,11 @@ const { contextBridge, ipcRenderer } = require('electron');
 // workbench runner to execute a user-clicked code block.
 contextBridge.exposeInMainWorld('__workbenchRunCode', {
   request: (payload) => ipcRenderer.invoke('desktop:run-web-code', payload),
+  project: (payload) => ipcRenderer.invoke('desktop:web-project', payload),
+  onProjectProgress: (callback) => {
+    if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('desktop:web-project-progress', handler);
+    return () => ipcRenderer.removeListener('desktop:web-project-progress', handler);
+  },
 });

@@ -79,6 +79,8 @@ export interface DesktopBridge {
   /** Apply model translations to the loaded page DOM. */
   applyWebTranslations: (id: string, mode: WebTranslationMode, translations: WebTranslation[]) => Promise<{ ok: boolean; applied?: number; error?: string }>;
   webChat: (id: string, prompt: string, timeoutMs?: number) => Promise<WebChatResult>;
+  /** Open the project wizard inside the native page without hiding it. */
+  openWebProjectWizard: (id: string) => Promise<{ ok: boolean; error?: string }>;
   onWebChatProgress: (callback: (event: WebChatProgressEvent) => void) => () => void;
   onWebLink: (callback: (event: { id: string; url: string }) => void) => () => void;
   onWebSelectionTranslate: (callback: (event: WebSelectionTranslateEvent) => void) => () => void;

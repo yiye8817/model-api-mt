@@ -2048,8 +2048,23 @@ export default function App() {
                 <ExternalLink size={13} />
               </button>
               <button
-                onClick={() => setShowProjectRunner(true)}
-                disabled={!activeProvider}
+                data-electron-web-host=""
+                onClick={() => {
+                  const desktop = getDesktop();
+                  const tab = centerTabs.find(item => item.id === activeCenterTab);
+                  if (desktop && tab?.kind === 'web') {
+                    if (typeof desktop.openWebProjectWizard !== 'function') {
+                      alert('网页项目向导需要重启桌面应用后使用。');
+                      return;
+                    }
+                    void desktop.openWebProjectWizard(tab.id).then(result => {
+                      if (!result.ok) alert(result.error || '无法打开网页项目向导');
+                    }).catch(error => alert(String(error?.message || error)));
+                    return;
+                  }
+                  setShowProjectRunner(true);
+                }}
+                disabled={!activeProvider && centerTabs.find(item => item.id === activeCenterTab)?.kind !== 'web'}
                 className="ml-1 p-1 rounded text-gray-500 hover:text-emerald-300 hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed"
                 title="项目运行向导：选择环境和语言，生成、编译、运行并自动修复工程"
                 aria-label="项目运行向导"

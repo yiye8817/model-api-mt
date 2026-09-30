@@ -10,7 +10,8 @@ const { fileURLToPath } = require('url');
 const fs = require('fs');
 const http = require('http');
 const { spawn } = require('child_process');
-const { runWebChat, startNewWebChat } = require('./web-chat.cjs');
+const { runWebChat, startNewWebChat, copyLatestAnswerMarkdown, detectSite } = require('./web-chat.cjs');
+const { buildProjectPrompt, wizardScript, runWebProject } = require('./web-project.cjs');
 
 if (!app) {
   console.error(
@@ -54,6 +55,7 @@ let fusionProc = null;
 /** @type {import('child_process').ChildProcess | null} */
 let fusionBackendProc = null;
 let stopping = false;
+const webProjectJobs = new Map();
 
 function log(...args) {
   console.log('[electron]', ...args);
@@ -752,6 +754,13 @@ function installWebCodeRunner(view) {
   })()`, true).catch(error => log('网页代码工具栏注入失败:', error?.message || error));
 }
 
+function installWebProjectWizard(view) {
+  if (!view || view.webContents.isDestroyed()) return Promise.resolve({ ok: false, error: '网页标签已关闭' });
+  return view.webContents.executeJavaScript(wizardScript(), true)
+    .then(result => result || { ok: true })
+    .catch(error => ({ ok: false, error: String(error?.message || error || '网页项目向导注入失败') }));
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -825,6 +834,79 @@ function registerIpc() {
       return { ...result, ok, statusCode: response.statusCode };
     } catch (error) {
       return { ok: false, error: String(error?.message || error || '本地执行失败') };
+    }
+  });
+
+  ipcMain.handle('desktop:open-web-project-wizard', async (_event, payload = {}) => {
+    const id = String(payload.id || '');
+    const entry = webTabs.get(id);
+    if (!entry) return { ok: false, error: '网页标签不存在或已关闭' };
+    const result = await installWebProjectWizard(entry.view);
+    if (result?.ok) focusWeb(id, entry.bounds, true);
+    return result;
+  });
+
+  ipcMain.handle('desktop:web-project', async (event, payload = {}) => {
+    const pageEntry = [...webTabs.values()].find(item => item.view?.webContents?.id === event.sender.id);
+    if (!pageEntry) return { ok: false, error: '网页标签已关闭或项目桥无效' };
+    const action = String(payload.action || 'generate');
+    const requestId = String(payload.requestId || `web-project-${Date.now()}`);
+    if (action === 'stop') {
+      webProjectJobs.get(requestId)?.abort();
+      return { ok: true, stopped: true };
+    }
+    const controller = new AbortController();
+    webProjectJobs.set(requestId, controller);
+    const report = (name, message, details = {}) => {
+      try {
+        if (!event.sender.isDestroyed()) event.sender.send('desktop:web-project-progress', {
+          requestId, event: name, message: String(message || ''), ...details,
+        });
+      } catch { /* 页面关闭时忽略进度 */ }
+    };
+    try {
+      if (action === 'generate') {
+        const goal = String(payload.goal || '').trim();
+        const language = String(payload.language || 'python').trim().toLowerCase();
+        const environment = String(payload.environment || '本机 Linux').trim();
+        const prompt = String(payload.prompt || '').trim() || buildProjectPrompt(goal, language, environment);
+        report('prompt', '正在发送项目提示词到当前网页模型');
+        const answer = await runWebChat(pageEntry.view, prompt, {
+          timeoutMs: 300000,
+          signal: controller.signal,
+          onProgress: (eventName, message, details) => report(eventName, message, details),
+        });
+        if (!answer.ok) return { ok: false, error: answer.error || '网页模型生成失败', partial: answer.partial };
+        return { ...answer, ok: true, content: answer.content || '' };
+      }
+      const goal = String(payload.goal || 'web_project').trim();
+      const services = {
+        signal: controller.signal,
+        report,
+        chat: async prompt => runWebChat(pageEntry.view, prompt, {
+          timeoutMs: 300000,
+          signal: controller.signal,
+          onProgress: (eventName, message, details) => report(eventName, message, details),
+        }),
+        copy: async () => copyLatestAnswerMarkdown(
+          pageEntry.view, detectSite(pageEntry.view.webContents.getURL() || ''), report,
+        ),
+        importMarkdown: async (markdown, slug) => {
+          const response = await postJsonToBackend('/api/markdown-project', { markdown, goal, slug });
+          const body = response.body && typeof response.body === 'object' ? response.body : {};
+          return { ...body, ok: response.statusCode >= 200 && response.statusCode < 300 };
+        },
+        run: async slug => {
+          const response = await postJsonToBackend('/api/run-project', { slug, timeoutSeconds: 120 });
+          const body = response.body && typeof response.body === 'object' ? response.body : {};
+          return { ...body, ok: response.statusCode >= 200 && response.statusCode < 300 };
+        },
+      };
+      return await runWebProject({ ...payload, goal, action: action === 'save-current' ? 'save-current' : 'generate' }, services);
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error || '网页项目流程失败') };
+    } finally {
+      webProjectJobs.delete(requestId);
     }
   });
 
