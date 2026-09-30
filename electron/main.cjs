@@ -312,6 +312,35 @@ function checkServer() {
   });
 }
 
+function postJsonToBackend(pathname, payload, timeoutMs = 130000) {
+  const body = JSON.stringify(payload || {});
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      hostname: '127.0.0.1',
+      port: Number(PORT),
+      path: pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let parsed = {};
+        try { parsed = raw ? JSON.parse(raw) : {}; } catch { parsed = { output: raw }; }
+        resolve({ statusCode: response.statusCode || 0, body: parsed });
+      });
+    });
+    request.setTimeout(timeoutMs, () => request.destroy(new Error('本地代码执行超时')));
+    request.on('error', reject);
+    request.write(body);
+    request.end();
+  });
+}
+
 function waitForServer(timeoutMs = 90000) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
@@ -537,6 +566,178 @@ function installWebLinkRouter(view) {
   })()`, true).catch(() => {});
 }
 
+/**
+ * 给原生网页中的 fenced code block 注入本地执行工具栏。
+ * WebContentsView 不经过 React 的 MarkdownRenderer，因此必须在页面自身
+ * 的 DOM 中添加按钮；真正的执行仍由本机 Flask runner 完成。
+ */
+function installWebCodeRunner(view) {
+  if (!view || view.webContents.isDestroyed()) return;
+  view.webContents.executeJavaScript(String.raw`(() => {
+    const aliases = {
+      python: 'python', py: 'python', python3: 'python',
+      javascript: 'javascript', js: 'javascript', node: 'javascript',
+      bash: 'bash', sh: 'bash', shell: 'bash', zsh: 'bash',
+      c: 'c', cpp: 'cpp', 'c++': 'cpp', cxx: 'cpp',
+      java: 'java', go: 'go', golang: 'go', rust: 'rust', rs: 'rust',
+      ruby: 'ruby', rb: 'ruby', php: 'php', html: 'html', htm: 'html',
+    };
+    const compiled = new Set(['c', 'cpp', 'java', 'go', 'rust']);
+    const normalize = value => {
+      const raw = String(value || '').trim().toLowerCase().replace(/^language-/, '');
+      return aliases[raw] || '';
+    };
+    const infer = (node, source) => {
+      const candidates = [
+        node.className,
+        node.parentElement && node.parentElement.className,
+        node.getAttribute('data-language'),
+        node.parentElement && node.parentElement.getAttribute('data-language'),
+        node.getAttribute('lang'),
+      ].join(' ');
+      const marked = candidates.match(/(?:language|lang)[-_ ]?([a-z0-9+#-]+)/i);
+      const fromClass = normalize(marked ? marked[1] : candidates);
+      if (fromClass) return fromClass;
+      const code = String(source || '');
+      if (/^#!.*\bpython(?:3)?\b/m.test(code) || /^(?:from\s+[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s+import|import\s+[A-Za-z_]\w*)/m.test(code) || /\bdef\s+[A-Za-z_]\w*\s*\([^)]*\)\s*:/m.test(code)) return 'python';
+      if (/^#!.*\b(?:ba)?sh\b/m.test(code) || /\b(?:echo|printf)\s+.+\n/.test(code) && /\$[A-Za-z_{]/.test(code)) return 'bash';
+      if (/\b(?:console\.log|const|let|var)\s+/.test(code)) return 'javascript';
+      if (/<(?:!doctype\s+html|html|head|body)\b/i.test(code)) return 'html';
+      if (/^\s*#include\s*[<"](?:iostream|vector|string|cstdio|cstdlib)/m.test(code)) return 'cpp';
+      if (/^\s*#include\s*[<"](?:stdio|stdlib|string)\.h[>"]/m.test(code)) return 'c';
+      if (/\bpublic\s+(?:final\s+|abstract\s+)?class\s+[A-Z]\w*/.test(code) && /\bstatic\s+void\s+main\s*\(/.test(code)) return 'java';
+      if (/^\s*package\s+main\b/m.test(code) && /\bfunc\s+main\s*\(/.test(code)) return 'go';
+      if (/\bfn\s+main\s*\(/.test(code) && /(?:println!|use\s+[A-Za-z_])/.test(code)) return 'rust';
+      return '';
+    };
+    const button = (label, color) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.textContent = label;
+      item.style.cssText = 'border:1px solid ' + color + ';border-radius:4px;background:rgba(15,23,42,.92);color:' + color + ';padding:3px 8px;margin:0 4px 0 0;font:12px ui-sans-serif,system-ui,sans-serif;cursor:pointer;';
+      return item;
+    };
+    const setBusy = (card, busy) => {
+      card.querySelectorAll('[data-workbench-code-action]').forEach(item => {
+        item.disabled = !!busy;
+        item.style.opacity = busy ? '.55' : '1';
+      });
+    };
+    const showResult = (card, data, action) => {
+      const output = card.querySelector('[data-workbench-code-output]');
+      if (!output) return;
+      const ok = !!data && data.ok !== false && (data.exit_code === undefined || data.exit_code === 0);
+      const value = data && data.output ? String(data.output) : (data && data.error ? String(data.error) : '');
+      output.style.display = 'block';
+      output.style.borderColor = ok ? 'rgba(16,185,129,.45)' : 'rgba(244,63,94,.55)';
+      output.style.color = ok ? '#a7f3d0' : '#fecdd3';
+      if (ok && action === 'run' && card.__workbenchHtmlCode) {
+        output.replaceChildren();
+        const frame = document.createElement('iframe');
+        frame.title = '本地 HTML 预览';
+        frame.sandbox.add('allow-scripts');
+        frame.style.cssText = 'display:block;width:100%;height:260px;border:0;background:white;';
+        frame.srcdoc = card.__workbenchHtmlCode;
+        output.appendChild(frame);
+        setBusy(card, false);
+        return;
+      }
+      output.textContent = value.trim() || (action === 'save'
+        ? ('已保存：' + String(data && (data.file?.name || data.file?.path) || 'workspace'))
+        : (ok ? '执行成功（无输出）' : '执行失败'));
+      setBusy(card, false);
+    };
+    const request = (card, codeNode, action, compileOnly) => {
+      const code = String(codeNode.textContent || '').replace(/\n$/, '');
+      const language = infer(codeNode, code);
+      const requestId = 'web-code-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      const output = card.querySelector('[data-workbench-code-output]');
+      card.__workbenchHtmlCode = language === 'html' && action === 'run' ? code : '';
+      if (!language) {
+        if (output) {
+          output.style.display = 'block';
+          output.style.color = '#fcd34d';
+          output.textContent = '无法识别代码语言，请在代码块标注 language-python、language-bash 等语言。';
+        }
+        return;
+      }
+      if (output) {
+        output.style.display = 'block';
+        output.style.color = '#cbd5e1';
+        output.style.borderColor = 'rgba(148,163,184,.35)';
+        output.textContent = action === 'save' ? '正在保存到本地 workspace…' : (compileOnly ? '正在本地编译…' : '正在本地执行…');
+      }
+      setBusy(card, true);
+      const bridge = window.__workbenchRunCode;
+      if (!bridge || typeof bridge.request !== 'function') {
+        showResult(card, { ok: false, error: '本地执行桥不可用，请重启桌面应用。' }, action);
+        return;
+      }
+      bridge.request({ requestId, action, code, language, compileOnly: !!compileOnly })
+        .then(result => showResult(card, result || { ok: false, error: '本地执行没有返回结果。' }, action))
+        .catch(error => showResult(card, { ok: false, error: String(error?.message || error) }, action));
+    };
+    const scan = () => {
+      document.querySelectorAll('pre code').forEach(codeNode => {
+        const pre = codeNode.closest('pre');
+        if (!pre || pre.getAttribute('data-workbench-code-pre') === '1') return;
+        const source = String(codeNode.textContent || '');
+        const language = infer(codeNode, source);
+        if (!language) return;
+        const parent = pre.parentElement;
+        if (!parent) return;
+        const card = document.createElement('div');
+        card.setAttribute('data-workbench-code-card', '1');
+        card.style.cssText = 'margin:8px 0;border:1px solid rgba(148,163,184,.35);border-radius:6px;overflow:hidden;';
+        const toolbar = document.createElement('div');
+        toolbar.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:5px 8px;background:rgba(15,23,42,.94);font:12px ui-sans-serif,system-ui,sans-serif;';
+        const label = document.createElement('span');
+        label.textContent = '本地代码 · ' + language;
+        label.style.cssText = 'color:#94a3b8;margin-right:6px;';
+        toolbar.appendChild(label);
+        const save = button('保存', '#cbd5e1');
+        save.setAttribute('data-workbench-code-action', 'save');
+        save.title = '保存代码到本地 workspace';
+        save.addEventListener('click', () => request(card, codeNode, 'save', false));
+        toolbar.appendChild(save);
+        const run = button(language === 'html' ? '本地预览/运行' : '本地运行', '#86efac');
+        run.setAttribute('data-workbench-code-action', 'run');
+        run.title = '在本机运行此代码';
+        run.addEventListener('click', () => request(card, codeNode, 'run', false));
+        toolbar.appendChild(run);
+        if (compiled.has(language)) {
+          const compile = button('编译', '#67e8f9');
+          compile.setAttribute('data-workbench-code-action', 'compile');
+          compile.title = '只在本机编译，不执行';
+          compile.addEventListener('click', () => request(card, codeNode, 'compile', true));
+          toolbar.appendChild(compile);
+        }
+        const output = document.createElement('pre');
+        output.setAttribute('data-workbench-code-output', '1');
+        output.style.cssText = 'display:none;white-space:pre-wrap;max-height:260px;overflow:auto;margin:0;padding:8px;background:rgba(2,6,23,.96);border-top:1px solid rgba(148,163,184,.35);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;';
+        pre.setAttribute('data-workbench-code-pre', '1');
+        parent.insertBefore(card, pre);
+        card.appendChild(toolbar);
+        card.appendChild(pre);
+        card.appendChild(output);
+      });
+    };
+    if (!window.__workbenchCodeRunnerObserver) {
+      const observer = new MutationObserver(() => {
+        if (window.__workbenchCodeRunnerScanTimer) return;
+        window.__workbenchCodeRunnerScanTimer = setTimeout(() => {
+          window.__workbenchCodeRunnerScanTimer = null;
+          scan();
+        }, 120);
+      });
+      observer.observe(document.documentElement || document, { childList: true, subtree: true });
+      window.__workbenchCodeRunnerObserver = observer;
+    }
+    scan();
+    return true;
+  })()`, true).catch(() => {});
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -579,6 +780,40 @@ function registerIpc() {
   }));
   ipcMain.handle('desktop:launch-agent', (_e, payload = {}) => launchDesktopAgent(payload));
 
+  ipcMain.handle('desktop:run-web-code', async (event, payload = {}) => {
+    const pageEntry = [...webTabs.values()].find(item => item.view?.webContents?.id === event.sender.id);
+    if (!pageEntry) return { ok: false, error: '网页标签已关闭或本地执行桥无效' };
+    const code = typeof payload.code === 'string' ? payload.code : '';
+    if (!code.trim()) return { ok: false, error: '代码内容为空' };
+    if (code.length > 500000) return { ok: false, error: '代码块过大，已拒绝执行' };
+    const aliases = {
+      python: 'python', py: 'python', python3: 'python',
+      javascript: 'javascript', js: 'javascript', node: 'javascript',
+      bash: 'bash', sh: 'bash', shell: 'shell', zsh: 'bash',
+      c: 'c', cpp: 'cpp', 'c++': 'cpp', cxx: 'cpp', java: 'java',
+      go: 'go', golang: 'go', rust: 'rust', rs: 'rust',
+      ruby: 'ruby', rb: 'ruby', php: 'php', html: 'html', htm: 'html',
+    };
+    const language = aliases[String(payload.language || '').trim().toLowerCase()] || '';
+    if (!language) return { ok: false, error: '不支持或无法识别的代码语言' };
+    const action = payload.action === 'save' ? 'save' : (payload.action === 'compile' ? 'compile' : 'run');
+    if (action === 'compile' && !new Set(['c', 'cpp', 'java', 'go', 'rust']).has(language)) {
+      return { ok: false, error: `${language} 没有独立编译按钮，请直接运行` };
+    }
+    const endpoint = action === 'save' ? '/api/save-code' : '/api/run-code';
+    const requestBody = action === 'save'
+      ? { content: code, language }
+      : { code, language, compileOnly: action === 'compile', timeoutSeconds: 120 };
+    try {
+      const response = await postJsonToBackend(endpoint, requestBody);
+      const result = response.body && typeof response.body === 'object' ? response.body : {};
+      const ok = response.statusCode >= 200 && response.statusCode < 300;
+      return { ...result, ok, statusCode: response.statusCode };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error || '本地执行失败') };
+    }
+  });
+
   ipcMain.handle('desktop:open-web', (_e, payload = {}) => {
     const id = String(payload.id || '');
     const url = String(payload.url || '').trim();
@@ -592,6 +827,7 @@ function registerIpc() {
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: true,
+          preload: path.join(__dirname, 'webview-preload.cjs'),
           session: browserSession,
           // 多个后台 AI 标签并行回答时，不因 WebContentsView 暂时卸载而节流。
           backgroundThrottling: false,
@@ -645,7 +881,7 @@ function registerIpc() {
       });
       view.webContents.on('did-finish-load', () => {
         if (!entry.pendingUrl) entry.allowNavigation = false;
-        void cleanupWebPageArtifacts(view);
+        void cleanupWebPageArtifacts(view).finally(() => installWebCodeRunner(view));
         installWebLinkRouter(view);
       });
       installWebClipboardSupport(view.webContents);
