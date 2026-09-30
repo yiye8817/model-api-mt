@@ -12,7 +12,7 @@ type TermLike = {
   element?: HTMLElement | null;
 };
 
-async function writeClipboard(text: string): Promise<boolean> {
+export async function copyTextToClipboard(text: string): Promise<boolean> {
   if (!text) return false;
   try {
     if (navigator.clipboard?.writeText) {
@@ -35,7 +35,7 @@ async function writeClipboard(text: string): Promise<boolean> {
   }
 }
 
-async function readClipboard(): Promise<string> {
+export async function readTextFromClipboard(): Promise<string> {
   try {
     if (navigator.clipboard?.readText) {
       return await navigator.clipboard.readText();
@@ -52,6 +52,7 @@ async function readClipboard(): Promise<string> {
 export function bindTermClipboard(
   term: TermLike,
   sendInput: (data: string) => void,
+  onSelectedContextMenu?: (text: string) => void,
 ): () => void {
   const isMod = (e: KeyboardEvent) => e.ctrlKey || e.metaKey;
 
@@ -63,7 +64,7 @@ export function bindTermClipboard(
     if (isMod(e) && key === 'c' && !e.shiftKey && term.hasSelection()) {
       e.preventDefault();
       e.stopPropagation();
-      void writeClipboard(term.getSelection());
+      void copyTextToClipboard(term.getSelection());
       return false;
     }
 
@@ -71,7 +72,7 @@ export function bindTermClipboard(
     if (isMod(e) && e.shiftKey && key === 'c' && term.hasSelection()) {
       e.preventDefault();
       e.stopPropagation();
-      void writeClipboard(term.getSelection());
+      void copyTextToClipboard(term.getSelection());
       return false;
     }
 
@@ -102,15 +103,19 @@ export function bindTermClipboard(
     sendInput(text);
   };
 
-  // 右键：有选区则复制；无选区则尝试粘贴
+  // 右键：有选区时交给调用方分析；无选区则尝试粘贴
   const onContextMenu = (ev: MouseEvent) => {
     ev.preventDefault();
     if (term.hasSelection()) {
-      void writeClipboard(term.getSelection());
+      if (onSelectedContextMenu) {
+        onSelectedContextMenu(term.getSelection());
+        return;
+      }
+      void copyTextToClipboard(term.getSelection());
       return;
     }
     void (async () => {
-      const text = await readClipboard();
+      const text = await readTextFromClipboard();
       if (text) sendInput(text);
       else term.focus();
     })();

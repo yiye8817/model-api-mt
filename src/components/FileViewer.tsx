@@ -21,6 +21,7 @@ interface FileData {
 interface Props {
   path: string;
   active: boolean;
+  onOpenUrl?: (url: string, title?: string) => void;
 }
 
 const HLJS_ALIAS: Record<string, string> = {
@@ -100,7 +101,7 @@ function MediaPreview({ kind, path, name, size }: { kind: 'image' | 'audio' | 'v
   );
 }
 
-export default function FileViewer({ path, active }: Props) {
+export default function FileViewer({ path, active, onOpenUrl }: Props) {
   const [data, setData] = useState<FileData | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -179,7 +180,7 @@ export default function FileViewer({ path, active }: Props) {
             </div>
           ) : data.is_markdown ? (
             <div className="px-4 py-3">
-              <MarkdownRenderer content={data.content} />
+              <MarkdownRenderer content={data.content} onOpenUrl={onOpenUrl} />
             </div>
           ) : (
             <CodeView content={data.content} lang={data.lang} />

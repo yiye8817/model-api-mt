@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   X, Wand2, Loader2, ArrowRight, ArrowLeft, Play, RefreshCw,
   Sparkles, CheckCircle2, XCircle, Plus, Trash2, KeyRound, Zap,
-  Minus, Maximize2, Minimize2, FileCode2, Square,
+  Minus, Maximize2, Minimize2, FileCode2, Square, ChevronUp, ChevronDown,
 } from 'lucide-react';
 import type { APIProvider } from '../types';
 
@@ -135,6 +135,7 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
       // 全部重置
       setStage('goal');
       setSteps([]);
+      setLanguage('bash');
       setScript('');
       setParameters([]);
       setParamValues({});
@@ -187,6 +188,7 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
     setStage('goal');
     setGoal('');
     setSteps([]);
+    setLanguage('bash');
     setScript('');
     setParameters([]);
     setParamValues({});
@@ -334,6 +336,10 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
       const lang = (data.language || '') as string;
       setSteps(newSteps);
       setPlanLanguage(lang);
+      // 单脚本工作流仅支持 bash/python；采用规划阶段推荐语言，避免初始 bash 覆盖 Python 计划。
+      if (!isProject && lang) {
+        setLanguage(lang === 'bash' || lang === 'sh' ? 'bash' : 'python');
+      }
       setStage('plan');
       return { steps: newSteps, language: lang };
     } catch (e: any) {
@@ -343,7 +349,7 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
     } finally {
       setLoading(false);
     }
-  }, [provider, beginOp]);
+  }, [provider, beginOp, isProject]);
 
   const handleGeneratePlan = () => { void doPlan(goal); };
 
@@ -926,7 +932,7 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
     if (regeneratingIndex != null) return { color: 'text-purple-300', dot: 'bg-purple-400 animate-pulse', label: `重写第 ${regeneratingIndex + 1} 步` };
     if (exitCode === 0) return { color: 'text-emerald-300', dot: 'bg-emerald-400', label: '执行成功' };
     if (exitCode != null && exitCode !== 0) return { color: 'text-red-300', dot: 'bg-red-400', label: `执行失败 (exit ${exitCode})` };
-    const stageLabel: Record<Stage, string> = { goal: '描述需求', plan: '规划步骤', script: '编辑脚本', run: '准备执行' };
+    const stageLabel: Record<Stage, string> = { goal: '描述需求', plan: '规划步骤', script: '编辑脚本', project: '生成工程', run: '准备执行' };
     return { color: 'text-gray-400', dot: 'bg-gray-500', label: stageLabel[stage] };
   }, [running, autoFixing, loading, regeneratingIndex, exitCode, stage, autoFixCount]);
 
@@ -997,7 +1003,7 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
     : 'fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4';
   const panelClass = isMax
     ? 'bg-gray-900 border border-gray-700 w-full h-full flex flex-col shadow-2xl'
-    : 'bg-gray-900 border border-gray-700 rounded-xl w-full max-w-3xl max-h-[88vh] flex flex-col shadow-2xl';
+    : 'bg-gray-900 border border-gray-700 rounded-xl w-full max-w-3xl h-[88dvh] flex flex-col shadow-2xl';
 
   return (
     <div className={containerClass}>
@@ -1054,7 +1060,11 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 text-sm text-gray-200">
+        <div className={`flex-1 min-h-0 px-5 py-4 text-sm text-gray-200 ${
+          stage === 'script' || stage === 'run'
+            ? 'flex flex-col gap-4 overflow-hidden'
+            : 'overflow-y-auto space-y-4'
+        }`}>
           {error && (
             <div className="bg-red-900/40 border border-red-500/40 text-red-200 rounded-lg px-3 py-2 text-xs whitespace-pre-wrap">
               {error}
@@ -1111,15 +1121,17 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
           )}
 
           {stage === 'script' && (
-            <ScriptForm
-              language={language}
-              script={script}
-              onScriptChange={setScript}
-              parameters={parameters}
-              values={paramValues}
-              onValuesChange={setParamValues}
-              fixReason={fixReason}
-            />
+            <div className="flex-1 min-h-0">
+              <ScriptForm
+                language={language}
+                script={script}
+                onScriptChange={setScript}
+                parameters={parameters}
+                values={paramValues}
+                onValuesChange={setParamValues}
+                fixReason={fixReason}
+              />
+            </div>
           )}
 
           {stage === 'project' && projectMeta && (
@@ -1136,30 +1148,32 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
           )}
 
           {stage === 'run' && (
-            <RunPanel
-              running={running}
-              exitCode={exitCode}
-              output={output}
-              outputRef={outputRef}
-              language={isProject ? (projectMeta?.language || 'project') : language}
-              script={isProject ? (projectMeta?.execCommand || '') : script}
-              sudoPromptOpen={sudoPromptOpen}
-              sudoPwdInput={sudoPwdInput}
-              onSudoPwdChange={setSudoPwdInput}
-              onSudoSubmit={handleSubmitSudoPwd}
-              onSudoCancel={() => setSudoPromptOpen(false)}
-              sudoSubmitting={sudoSubmitting}
-              refinement={refinement}
-              onRefinementChange={setRefinement}
-              onRefine={handleRefine}
-              refineLoading={loading}
-              autoFix={autoFix}
-              onAutoFixChange={setAutoFix}
-              autoFixing={autoFixing}
-              autoFixCount={autoFixCount}
-              autoFixMax={MAX_AUTO_FIX}
-              onStop={() => { void handleStop(); }}
-            />
+            <div className="flex-1 min-h-0">
+              <RunPanel
+                running={running}
+                exitCode={exitCode}
+                output={output}
+                outputRef={outputRef}
+                language={isProject ? (projectMeta?.language || 'project') : language}
+                script={isProject ? (projectMeta?.execCommand || '') : script}
+                sudoPromptOpen={sudoPromptOpen}
+                sudoPwdInput={sudoPwdInput}
+                onSudoPwdChange={setSudoPwdInput}
+                onSudoSubmit={handleSubmitSudoPwd}
+                onSudoCancel={() => setSudoPromptOpen(false)}
+                sudoSubmitting={sudoSubmitting}
+                refinement={refinement}
+                onRefinementChange={setRefinement}
+                onRefine={handleRefine}
+                refineLoading={loading}
+                autoFix={autoFix}
+                onAutoFixChange={setAutoFix}
+                autoFixing={autoFixing}
+                autoFixCount={autoFixCount}
+                autoFixMax={MAX_AUTO_FIX}
+                onStop={() => { void handleStop(); }}
+              />
+            </div>
           )}
         </div>
 
@@ -1551,14 +1565,14 @@ function ScriptForm({
   fixReason: string | null;
 }) {
   return (
-    <div className="space-y-4">
+    <div className="h-full min-h-0 flex flex-col gap-4 overflow-hidden">
       {fixReason && (
         <div className="bg-amber-900/30 border border-amber-500/30 text-amber-200 rounded px-3 py-2 text-xs">
           🛠 {fixReason}
         </div>
       )}
       {parameters.length > 0 && (
-        <div className="space-y-2">
+        <div className="shrink-0 max-h-[38%] overflow-y-auto space-y-2 pr-1">
           <div className="text-xs uppercase tracking-wider text-gray-500">需要你确认/输入的参数</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 bg-gray-800/40 border border-gray-700 rounded-lg p-3">
             {parameters.map(p => (
@@ -1600,17 +1614,16 @@ function ScriptForm({
           </div>
         </div>
       )}
-      <div className="space-y-1">
-        <div className="flex items-center justify-between text-xs text-gray-500">
+      <div className="flex-1 min-h-0 flex flex-col gap-1">
+        <div className="flex items-center justify-between text-xs text-gray-500 shrink-0">
           <span className="uppercase tracking-wider">脚本预览（{language}，可微调）</span>
           <span className="text-[11px] text-gray-600">环境变量将自动注入运行时</span>
         </div>
         <textarea
           value={script}
           onChange={e => onScriptChange(e.target.value)}
-          rows={Math.min(20, Math.max(8, script.split('\n').length))}
           spellCheck={false}
-          className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 focus:outline-none focus:ring-1 focus:ring-purple-500 leading-relaxed"
+          className="flex-1 min-h-0 w-full resize-none bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 focus:outline-none focus:ring-1 focus:ring-purple-500 leading-relaxed"
         />
       </div>
     </div>
@@ -1646,10 +1659,11 @@ function RunPanel({
   autoFixCount: number;
   autoFixMax: number;
 }) {
+  const [showExecutedScript, setShowExecutedScript] = useState(false);
   const finished = !running && exitCode != null && !autoFixing;
   const reachedAutoFixLimit = autoFixCount >= autoFixMax && exitCode != null && exitCode !== 0;
   return (
-    <div className="space-y-2">
+    <div className="h-full min-h-0 flex flex-col gap-2 overflow-hidden">
       <div className="flex items-center gap-2 text-xs flex-wrap">
         {autoFixing ? (
           <span className="flex items-center gap-1.5 text-amber-300">
@@ -1740,7 +1754,7 @@ function RunPanel({
 
       <div
         ref={outputRef}
-        className="bg-[#0f172a] border border-gray-700 rounded-lg p-3 font-mono text-xs text-gray-200 whitespace-pre-wrap break-all overflow-auto max-h-[44vh] min-h-[160px]"
+        className="flex-1 min-h-[120px] bg-[#0f172a] border border-gray-700 rounded-lg p-3 font-mono text-xs text-gray-200 whitespace-pre-wrap break-all overflow-auto"
       >
         {output || (running ? '' : '(暂无输出)')}
       </div>
@@ -1771,10 +1785,24 @@ function RunPanel({
         </div>
       )}
 
-      <details className="text-[11px] text-gray-500">
-        <summary className="cursor-pointer hover:text-gray-300">查看本次执行的脚本</summary>
-        <pre className="mt-2 bg-gray-950/80 border border-gray-800 rounded p-2 text-gray-400 whitespace-pre-wrap">{script}</pre>
-      </details>
+      <div className={`${
+        showExecutedScript ? 'basis-[42%] min-h-[96px] shrink' : 'shrink-0'
+      } flex flex-col min-h-0 overflow-hidden`}>
+        {showExecutedScript && (
+          <pre className="flex-1 min-h-0 mb-1 bg-gray-950/80 border border-gray-800 rounded p-2 text-[11px] text-gray-400 whitespace-pre-wrap break-all overflow-auto">
+            {script}
+          </pre>
+        )}
+        <button
+          type="button"
+          onClick={() => setShowExecutedScript(open => !open)}
+          aria-expanded={showExecutedScript}
+          className="shrink-0 self-start flex items-center gap-1 text-[11px] text-gray-500 hover:text-gray-300"
+        >
+          {showExecutedScript ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+          {showExecutedScript ? '收起本次执行的脚本' : '查看本次执行的脚本'}
+        </button>
+      </div>
     </div>
   );
 }

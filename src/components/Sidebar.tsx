@@ -25,6 +25,8 @@ interface Props {
   onRefreshProviderModels?: (providerId: string) => Promise<void> | void;
   onAddLocalProvider?: (port: string, host?: string) => Promise<void> | void;
   onOpenLocalHub?: () => void;
+  /** 在应用内中部标签页打开 Provider 来源 URL */
+  onOpenProviderSource?: (url: string, title?: string) => void;
 }
 
 export default function Sidebar({
@@ -46,6 +48,7 @@ export default function Sidebar({
   onRefreshProviderModels,
   onAddLocalProvider,
   onOpenLocalHub,
+  onOpenProviderSource,
 }: Props) {
   const [showProviders, setShowProviders] = useState(true);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
@@ -166,13 +169,21 @@ export default function Sidebar({
                   onClick={() => onSelectProvider(p.id)}
                 >
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">{p.name}</div>
+                    <div className="text-sm font-medium truncate flex items-center gap-1.5">
+                      <span className="truncate">{p.name}</span>
+                      {p.isDefault && <span className="shrink-0 text-[9px] px-1 rounded bg-amber-500/15 text-amber-300">默认</span>}
+                    </div>
                     <div className="text-xs text-gray-500 truncate font-mono">{p.selectedModel || 'No model'}</div>
                   </div>
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     {p.source?.trim() && (
                       <button
-                        onClick={e => { e.stopPropagation(); window.open(p.source!.trim(), '_blank'); }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          const url = p.source!.trim();
+                          if (onOpenProviderSource) onOpenProviderSource(url, p.name);
+                          else window.open(url, '_blank', 'noopener,noreferrer');
+                        }}
                         className="p-1 hover:text-amber-400"
                         title="打开 Provider 来源"
                       >

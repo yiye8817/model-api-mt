@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Terminal as TerminalIcon, X, Maximize2, Trash2, Square, MessageCircle } from 'lucide-react';
 import type { TerminalLine } from '../types';
+import { registerTerminalLinkProvider, terminalLinkHandler } from '../lib/terminalLinks';
+import { getDesktop } from '../lib/desktopBridge';
 import 'xterm/css/xterm.css';
 
 const ANSI_FG: Record<number, string> = {
@@ -45,6 +47,8 @@ export default function Terminal({ visible, onClose, onSendToChat }: Props) {
   const [historyIdx, setHistoryIdx] = useState(-1);
   const [maximized, setMaximized] = useState(false);
   const [cwd, setCwd] = useState('~');
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
   const [wsConnected, setWsConnected] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -68,6 +72,7 @@ export default function Terminal({ visible, onClose, onSendToChat }: Props) {
   useEffect(() => {
     if (!visible || wsAvailable !== true || !containerRef.current) return;
     let ws: WebSocket | null = null;
+    let linkDisposable: { dispose: () => void } | null = null;
     const init = async () => {
       const [xtermMod, fitMod] = await Promise.all([
         import('xterm'),
@@ -75,6 +80,15 @@ export default function Terminal({ visible, onClose, onSendToChat }: Props) {
       ]);
       const Terminal = xtermMod.Terminal;
       const FitAddon = (fitMod as any).FitAddon ?? (fitMod as any).default;
+      const openTerminalTarget = (target: string) => {
+        const desktop = getDesktop();
+        if (/^https?:\/\//i.test(target)) {
+          if (desktop) void desktop.openExternal(target);
+          else window.open(target, '_blank', 'noopener,noreferrer');
+        } else if (desktop) {
+          void desktop.openTarget({ target, cwd: cwdRef.current === '~' ? undefined : cwdRef.current });
+        }
+      };
       const term = new Terminal({
         fontFamily: 'ui-monospace, "Cascadia Code", "JetBrains Mono", monospace',
         fontSize: 13,
@@ -105,12 +119,14 @@ export default function Terminal({ visible, onClose, onSendToChat }: Props) {
           brightCyan: '#67e8f9',
           brightWhite: '#f8fafc',
         },
+        linkHandler: terminalLinkHandler(openTerminalTarget),
       });
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(containerRef.current!);
       fitAddon.fit();
       termRef.current = { term, fitAddon };
+      linkDisposable = registerTerminalLinkProvider(term, link => openTerminalTarget(link.text));
 
       const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws';
       ws = new WebSocket(wsUrl);
@@ -174,6 +190,7 @@ export default function Terminal({ visible, onClose, onSendToChat }: Props) {
         termRef.current.term.dispose();
         termRef.current = null;
       }
+      try { linkDisposable?.dispose(); } catch { /* noop */ }
       cleanup?.();
     };
   }, [visible, wsAvailable]);

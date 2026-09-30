@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
 import type { TerminalLine } from '../types';
+import { bindTermClipboard, copyTextToClipboard, readTextFromClipboard } from '../lib/termClipboard';
+import { registerTerminalLinkProvider, terminalLinkHandler, type TerminalTextLink } from '../lib/terminalLinks';
+import { getDesktop } from '../lib/desktopBridge';
 import 'xterm/css/xterm.css';
 
 const ANSI_FG: Record<number, string> = {
@@ -30,6 +33,10 @@ function parseAnsiToSpans(raw: string): { text: string; className: string }[] {
 export interface TerminalSessionHandle {
   clear: () => void;
   sendSelectionToChat: (fallbackSelection?: string | null) => void;
+  copySelection: (fallbackSelection?: string | null) => Promise<boolean>;
+  pasteClipboard: () => Promise<boolean>;
+  /** Query the shell process for its current working directory. */
+  getCwd: () => Promise<string | null>;
   focus: () => void;
   fit: () => void;
 }
@@ -38,10 +45,20 @@ interface Props {
   active: boolean;
   wsAvailable: boolean | null;
   onSendToChat?: (text: string) => void;
+  /** Optional command sent once after the PTY is ready. */
+  initialCommand?: string;
+  /** Directory to enter once after the PTY is ready. Ignored when initialCommand is set. */
+  initialCwd?: string;
+  /** Open a terminal path using browser-tab/default-app routing. */
+  onOpenPath?: (path: string, cwd?: string) => void;
+  /** Open an HTTP(S) terminal link in the workbench browser tab. */
+  onOpenUrl?: (url: string, title?: string) => void;
+  /** Analyze selected terminal text with the configured default model. */
+  onSelectedContextMenu?: (text: string) => void;
 }
 
 const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function TerminalSession(
-  { active, wsAvailable, onSendToChat }, ref,
+  { active, wsAvailable, onSendToChat, initialCommand, initialCwd, onOpenPath, onOpenUrl, onSelectedContextMenu }, ref,
 ) {
   const [lines, setLines] = useState<TerminalLine[]>([
     { id: 'welcome', type: 'system', content: '🖥️  Terminal ready. Type commands and press Enter to execute.\n   Type "help" for available commands. Type "clear" to clear screen.', timestamp: Date.now() },
@@ -59,16 +76,62 @@ const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function Termin
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<{ term: any; fitAddon: any } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const selectedTextRef = useRef('');
+  const cwdRequestsRef = useRef(new Map<string, (cwd: string | null) => void>());
+
+  const shellQuote = useCallback((value: string) => `'${value.replace(/'/g, `'\\''`)}'`, []);
+  const getCwd = useCallback((): Promise<string | null> => new Promise(resolve => {
+    const request = () => {
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        const requestId = crypto.randomUUID();
+        cwdRequestsRef.current.set(requestId, resolve);
+        ws.send(JSON.stringify({ type: 'cwd', requestId }));
+        window.setTimeout(() => {
+          const pending = cwdRequestsRef.current.get(requestId);
+          if (!pending) return;
+          cwdRequestsRef.current.delete(requestId);
+          pending(null);
+        }, 2500);
+        return;
+      }
+      // The PTY can still be opening when the dock's + button is clicked.
+      if (Date.now() < deadline) {
+        window.setTimeout(request, 100);
+        return;
+      }
+      resolve(null);
+    };
+    const deadline = Date.now() + 2500;
+    request();
+  }), []);
 
   // 建立 PTY WebSocket（每个会话独立，后端按连接 fork 各自的 shell）
   useEffect(() => {
     if (wsAvailable !== true || !containerRef.current) return;
     let ws: WebSocket | null = null;
     let ro: ResizeObserver | null = null;
+    let clipboardCleanup: (() => void) | null = null;
+    let selectionDisposable: { dispose: () => void } | null = null;
+    let linkDisposable: { dispose: () => void } | null = null;
     const init = async () => {
       const [xtermMod, fitMod] = await Promise.all([import('xterm'), import('xterm-addon-fit')]);
       const Terminal = xtermMod.Terminal;
       const FitAddon = (fitMod as any).FitAddon ?? (fitMod as any).default;
+      const openTerminalTarget = (target: string) => {
+        if (/^https?:\/\//i.test(target)) {
+          const desktop = getDesktop();
+          if (onOpenUrl) onOpenUrl(target);
+          else if (desktop) void desktop.openExternal(target);
+          else window.open(target, '_blank', 'noopener,noreferrer');
+          return;
+        }
+        const openPath = async () => {
+          const currentCwd = await getCwd();
+          onOpenPath?.(target, currentCwd || undefined);
+        };
+        void openPath();
+      };
       const term = new Terminal({
         fontFamily: 'ui-monospace, "Cascadia Code", "JetBrains Mono", monospace',
         fontSize: 13,
@@ -84,12 +147,27 @@ const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function Termin
           brightBlack: '#64748b', brightRed: '#fca5a5', brightGreen: '#86efac', brightYellow: '#fde047',
           brightBlue: '#93c5fd', brightMagenta: '#d8b4fe', brightCyan: '#67e8f9', brightWhite: '#f8fafc',
         },
+        linkHandler: terminalLinkHandler(openTerminalTarget),
       });
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(containerRef.current!);
       try { fitAddon.fit(); } catch { /* noop */ }
       termRef.current = { term, fitAddon };
+      // xterm's built-in OSC-8 support only handles hyperlinks explicitly
+      // emitted by the PTY. Agent logs are plain JSON/text, so use the shared
+      // provider for URLs and relative/absolute paths as well.
+      linkDisposable = registerTerminalLinkProvider(term, (link: TerminalTextLink) => openTerminalTarget(link.text));
+      clipboardCleanup = bindTermClipboard(term, (data: string) => {
+        if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }));
+      }, onSelectedContextMenu);
+      selectionDisposable = term.onSelectionChange(() => {
+        if (term.hasSelection()) {
+          const text = term.getSelection();
+          selectedTextRef.current = text;
+          void copyTextToClipboard(text);
+        }
+      });
 
       const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws';
       ws = new WebSocket(wsUrl);
@@ -99,12 +177,33 @@ const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function Termin
         setWsConnected(true);
         const { cols, rows } = term;
         ws!.send(JSON.stringify({ type: 'resize', cols, rows }));
+        const command = initialCommand?.trim()
+          || (initialCwd?.trim() ? `cd -- ${shellQuote(initialCwd.trim())}` : '');
+        if (command) {
+          // Give the shell one tick to finish its prompt setup before typing
+          // the command, otherwise the first characters can be swallowed by
+          // shells that emit a startup banner.
+          window.setTimeout(() => {
+            if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data: `${command}\n` }));
+          }, 80);
+        }
       };
       ws.onmessage = (e: MessageEvent) => {
         if (e.data instanceof ArrayBuffer) {
           term.write(new TextDecoder().decode(new Uint8Array(e.data)));
         } else if (typeof e.data === 'string') {
-          try { if (JSON.parse(e.data)?.type === 'pong') return; } catch { /* noop */ }
+          try {
+            const message = JSON.parse(e.data);
+            if (message?.type === 'pong') return;
+            if (message?.type === 'cwd') {
+              const pending = cwdRequestsRef.current.get(String(message.requestId || ''));
+              if (pending) {
+                cwdRequestsRef.current.delete(String(message.requestId || ''));
+                pending(typeof message.cwd === 'string' && message.cwd ? message.cwd : null);
+              }
+              return;
+            }
+          } catch { /* PTY output is plain text */ }
           term.write(e.data);
         }
       };
@@ -122,12 +221,17 @@ const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function Termin
     init();
     return () => {
       ro?.disconnect();
+      clipboardCleanup?.();
+      selectionDisposable?.dispose();
+      try { linkDisposable?.dispose(); } catch { /* noop */ }
       try { ws?.close(); } catch { /* noop */ }
+      cwdRequestsRef.current.forEach(resolve => resolve(null));
+      cwdRequestsRef.current.clear();
       wsRef.current = null;
       try { termRef.current?.term.dispose(); } catch { /* noop */ }
       termRef.current = null;
     };
-  }, [wsAvailable]);
+  }, [wsAvailable, initialCommand, initialCwd, onOpenPath, onOpenUrl, onSelectedContextMenu, shellQuote, getCwd]);
 
   // 标签从隐藏切到可见：适配尺寸并聚焦
   useEffect(() => {
@@ -245,6 +349,31 @@ const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function Termin
     } catch { /* ignore */ }
   }, [input, cwd]);
 
+  const useWsTerminal = wsAvailable === true;
+
+  const copySelection = useCallback(async (fallbackSelection?: string | null) => {
+    const text = termRef.current?.term?.hasSelection?.()
+      ? termRef.current.term.getSelection()
+      : (fallbackSelection || selectedTextRef.current || window.getSelection()?.toString() || '');
+    const copied = await copyTextToClipboard(text);
+    if (copied) selectedTextRef.current = text;
+    return copied;
+  }, []);
+
+  const pasteClipboard = useCallback(async () => {
+    const text = await readTextFromClipboard();
+    if (!text) return false;
+    if (useWsTerminal) {
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+      wsRef.current.send(JSON.stringify({ type: 'input', data: text }));
+      termRef.current?.term.focus();
+    } else {
+      setInput(prev => prev + text);
+      inputRef.current?.focus();
+    }
+    return true;
+  }, [useWsTerminal]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') { e.preventDefault(); handleSubmit(); }
     else if (e.key === 'ArrowUp') {
@@ -283,6 +412,9 @@ const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function Termin
       const s = fallbackSelection ?? window.getSelection()?.toString().trim();
       if (s) onSendToChat(s);
     },
+    copySelection,
+    pasteClipboard,
+    getCwd,
     focus: () => {
       if (wsAvailable === true) termRef.current?.term.focus();
       else inputRef.current?.focus();
@@ -290,9 +422,7 @@ const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function Termin
     fit: () => {
       try { termRef.current?.fitAddon.fit(); } catch { /* noop */ }
     },
-  }), [onSendToChat, wsAvailable]);
-
-  const useWsTerminal = wsAvailable === true;
+  }), [copySelection, getCwd, onSendToChat, pasteClipboard, wsAvailable]);
 
   return (
     <div
@@ -316,7 +446,14 @@ const TerminalSession = forwardRef<TerminalSessionHandle, Props>(function Termin
         <div ref={containerRef} className="flex-1 min-h-0 w-full p-2" style={{ minHeight: 120 }} />
       ) : (
         <>
-          <div ref={outputRef} className="flex-1 overflow-y-auto px-4 py-2 font-mono text-sm select-text">
+          <div
+            ref={outputRef}
+            onMouseUp={() => {
+              const text = window.getSelection()?.toString() || '';
+              if (text) { selectedTextRef.current = text; void copyTextToClipboard(text); }
+            }}
+            className="flex-1 overflow-y-auto px-4 py-2 font-mono text-sm select-text"
+          >
             {lines.map(line => (
               <div key={line.id} className="mb-0.5">
                 {line.type === 'input' && <span className="text-green-400 whitespace-pre-wrap">{line.content}</span>}

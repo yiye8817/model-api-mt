@@ -1,0 +1,31 @@
+{
+  "base_url": "http://127.0.0.1:8765/v1",
+  "model": "chatgpt",
+  "api_key_env": "FUSION_AGENT_API_KEY",
+  "api_key_file": "",
+  "workspace": "workspace",
+  "runtime_dir": ".runtime",
+  "skills_dir": "skills",
+  "timeout": 900,
+  "max_steps": 20,
+  "max_context_chars": 160000,
+  "allowed_capabilities": [
+    "files",
+    "skills",
+    "web"
+  ],
+  "browser_headless": false,
+  "browser_channel": null,
+  "browser_sandbox": true,
+  "allow_remote_http": false,
+  "log_content": true,
+  "response_delivery": "file",
+  "save_problem_json": true,
+  "python_tool_fallback": true,
+  "filesystem_scope": "host",
+  "auto_save_config": true,
+  "verbose": false,
+  "non_interactive": false,
+  "auto_start_parent": true,
+  "default_skills": []
+}

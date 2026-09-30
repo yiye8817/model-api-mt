@@ -5,7 +5,7 @@ Persistent storage for providers, conversations, and settings.
 
 Usage:
     pip install flask requests
-    pip install duckduckgo-search   # optional, for 联网搜索 (web search)
+    pip install ddgs                # optional, for 联网搜索 (web search)
     pip install flask-sock         # optional, for WebSocket PTY terminal (syntax highlight + interactive)
     python server.py
 
@@ -19,6 +19,8 @@ import os
 import subprocess
 import tempfile
 import logging
+import sqlite3
+from logging.handlers import RotatingFileHandler
 import platform
 import time
 import threading
@@ -28,19 +30,22 @@ import struct
 import signal
 import shlex
 import ast
+from urllib.parse import urlparse
 
 # Get the absolute path of the directory where this script lives
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DIST_DIR = os.path.join(BASE_DIR, 'dist')
 WORKSPACE_DIR = os.path.join(BASE_DIR, 'workspace')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
+LOG_DIR = os.path.abspath(os.environ.get('LOG_DIR') or os.path.join(BASE_DIR, 'logs'))
 
 # Create required directories
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 
 try:
-    from flask import Flask, request, Response, send_from_directory, send_file, jsonify, stream_with_context
+    from flask import Flask, request, Response, send_from_directory, send_file, jsonify, stream_with_context, g, has_request_context
     import requests as http_requests
 except ImportError:
     print("=" * 60)
@@ -49,13 +54,165 @@ except ImportError:
     print("=" * 60)
     sys.exit(1)
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
+# Configure console + rotating file logs.
+def _int_env(name, default):
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+_LOG_MAX_BYTES = _int_env('LOG_MAX_BYTES', 10 * 1024 * 1024)
+_LOG_BACKUP_COUNT = _int_env('LOG_BACKUP_COUNT', 7)
+_LLM_LOG_MAX_CHARS = _int_env('LLM_LOG_MAX_CHARS', 50000)
+_LOG_LLM_CONTENT = os.environ.get('LOG_LLM_CONTENT', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+_LOG_FORMAT = logging.Formatter(
+    '%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
 )
-logger = logging.getLogger(__name__)
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_LOG_FORMAT)
+_server_file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, 'server.log'),
+    maxBytes=_LOG_MAX_BYTES,
+    backupCount=_LOG_BACKUP_COUNT,
+    encoding='utf-8',
+)
+_server_file_handler.setFormatter(_LOG_FORMAT)
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _server_file_handler], force=True)
+# DDGS 会把单个备用引擎失败记为 INFO，随后正常回退；避免将其误认为接口失败。
+logging.getLogger('ddgs').setLevel(logging.WARNING)
+logging.getLogger('primp').setLevel(logging.WARNING)
+logger = logging.getLogger('model_api')
+
+_interaction_file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, 'llm-interactions.log'),
+    maxBytes=_LOG_MAX_BYTES,
+    backupCount=_LOG_BACKUP_COUNT,
+    encoding='utf-8',
+)
+_interaction_file_handler.setFormatter(_LOG_FORMAT)
+interaction_logger = logging.getLogger('llm_interactions')
+interaction_logger.setLevel(logging.INFO)
+interaction_logger.handlers.clear()
+interaction_logger.addHandler(_interaction_file_handler)
+interaction_logger.propagate = False
+
+_SENSITIVE_LOG_KEYS = {
+    'apikey', 'authorization', 'password', 'sudopassword', 'token',
+    'accesstoken', 'refreshtoken', 'secret', 'clientsecret',
+}
+_SENSITIVE_CONTAINER_KEYS = {'keys', 'credentials', 'secrets'}
+
+
+def _log_value(value, depth=0):
+    """Return a JSON-serializable, size-limited value with credentials removed."""
+    if depth > 12:
+        return '<max-depth>'
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            key_text = str(key)
+            key_norm = re.sub(r'[^a-z0-9]', '', key_text.lower())
+            if key_norm in _SENSITIVE_CONTAINER_KEYS:
+                if isinstance(item, dict):
+                    out[key_text] = {
+                        str(child_key): ('***REDACTED***' if child_value else child_value)
+                        for child_key, child_value in item.items()
+                    }
+                else:
+                    out[key_text] = '***REDACTED***'
+            elif key_norm in _SENSITIVE_LOG_KEYS or key_norm.endswith('apikey'):
+                out[key_text] = '***REDACTED***'
+            else:
+                out[key_text] = _log_value(item, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_log_value(item, depth + 1) for item in value]
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', errors='replace')
+    if isinstance(value, str):
+        if value.startswith('data:'):
+            return f'<data-url omitted; {len(value)} chars>'
+        value = re.sub(r'(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+', r'\1***REDACTED***', value)
+        value = re.sub(r'(?i)\bsk-[A-Za-z0-9_-]{12,}\b', 'sk-***REDACTED***', value)
+        value = re.sub(r'(https?://)[^/@:\s]+:[^/@\s]+@', r'\1***:***@', value)
+        if len(value) > _LLM_LOG_MAX_CHARS:
+            omitted = len(value) - _LLM_LOG_MAX_CHARS
+            return value[:_LLM_LOG_MAX_CHARS] + f'\n... <truncated {omitted} chars>'
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)
+
+
+def _log_summary(value):
+    if isinstance(value, dict):
+        return {'logging': 'content-disabled', 'keys': list(value.keys())[:30]}
+    if isinstance(value, (list, tuple)):
+        return {'logging': 'content-disabled', 'items': len(value)}
+    return {'logging': 'content-disabled', 'chars': len(str(value or ''))}
+
+
+def _request_id():
+    if has_request_context():
+        return getattr(g, 'request_id', None)
+    return None
+
+
+def _log_interaction(event, **fields):
+    """Write one structured LLM/search/workflow event; never fail the request."""
+    try:
+        if not _LOG_LLM_CONTENT:
+            for key in ('messages', 'system_prompt', 'user_prompt', 'response', 'body'):
+                if key in fields:
+                    fields[key] = _log_summary(fields[key])
+        record = {'event': event, 'request_id': fields.pop('request_id', None) or _request_id()}
+        record.update(fields)
+        interaction_logger.info(json.dumps(_log_value(record), ensure_ascii=False, separators=(',', ':')))
+    except Exception as exc:
+        logger.warning('Could not write interaction log: %s', exc)
+
+
+def _sse_content(frame):
+    """Extract text deltas from OpenAI- or Anthropic-style SSE frames."""
+    if isinstance(frame, bytes):
+        frame = frame.decode('utf-8', errors='replace')
+    chunks = []
+    for line in str(frame or '').splitlines():
+        line = line.strip()
+        if not line.startswith('data:'):
+            continue
+        raw = line[5:].strip()
+        if not raw or raw == '[DONE]':
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        for choice in data.get('choices') or []:
+            delta = choice.get('delta') or {}
+            message = choice.get('message') or {}
+            for key in ('reasoning_content', 'content'):
+                text = delta.get(key)
+                if isinstance(text, str):
+                    chunks.append(text)
+            text = message.get('content')
+            if isinstance(text, str):
+                chunks.append(text)
+        delta = data.get('delta') or {}
+        if isinstance(delta.get('text'), str):
+            chunks.append(delta['text'])
+        block = data.get('content_block') or {}
+        if isinstance(block.get('text'), str):
+            chunks.append(block['text'])
+    return ''.join(chunks)
+
+
+logger.info('日志已启用: server=%s interactions=%s',
+            os.path.join(LOG_DIR, 'server.log'),
+            os.path.join(LOG_DIR, 'llm-interactions.log'))
 
 try:
     import plugin_manager as pm
@@ -65,6 +222,60 @@ except ImportError:
 # Create Flask app
 app = Flask(__name__, static_folder=None)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max upload
+
+_FLOW_PREFIXES = (
+    '/api/chat', '/api/research', '/api/agent', '/api/web-search',
+    '/api/plugins', '/api/chat-with-plugin', '/claude-proxy/', '/hermes-proxy/',
+)
+
+
+@app.before_request
+def _flow_log_start():
+    path = request.path or ''
+    if not any(path.startswith(prefix) for prefix in _FLOW_PREFIXES):
+        return None
+    g.request_id = request.headers.get('X-Request-ID') or uuid.uuid4().hex
+    g.flow_started_at = time.monotonic()
+    _log_interaction('flow.start', method=request.method, path=path)
+    if request.method in ('POST', 'PUT', 'PATCH') and request.is_json:
+        _log_interaction(
+            'flow.input',
+            method=request.method,
+            path=path,
+            body=request.get_json(silent=True),
+        )
+    logger.info('Flow start id=%s method=%s path=%s', g.request_id, request.method, path)
+    return None
+
+
+@app.after_request
+def _flow_log_complete(response):
+    request_id = getattr(g, 'request_id', None)
+    if not request_id:
+        return response
+    elapsed_ms = round((time.monotonic() - getattr(g, 'flow_started_at', time.monotonic())) * 1000, 1)
+    response.headers['X-Request-ID'] = request_id
+    _log_interaction(
+        'flow.complete',
+        request_id=request_id,
+        method=request.method,
+        path=request.path,
+        status=response.status_code,
+        elapsed_ms=elapsed_ms,
+        streamed=bool(response.is_streamed),
+    )
+    if not response.is_streamed and response.is_json:
+        _log_interaction(
+            'flow.output',
+            request_id=request_id,
+            method=request.method,
+            path=request.path,
+            status=response.status_code,
+            body=response.get_json(silent=True),
+        )
+    logger.info('Flow complete id=%s status=%s elapsed_ms=%s path=%s',
+                request_id, response.status_code, elapsed_ms, request.path)
+    return response
 
 # WebSocket + PTY terminal (optional: pip install flask-sock, Unix only)
 _sock = None
@@ -110,6 +321,16 @@ class _PTYSession:
             self.alive = True
             t = threading.Thread(target=self._read_loop, daemon=True)
             t.start()
+
+    def cwd(self):
+        """Return the shell's current directory when the host exposes /proc."""
+        if not self.pid:
+            return None
+        try:
+            current = os.readlink(f'/proc/{self.pid}/cwd')
+            return current if os.path.isdir(current) else None
+        except (OSError, TypeError):
+            return None
 
     def _read_loop(self):
         while self.alive and self.master_fd is not None:
@@ -182,6 +403,12 @@ if _PTY_AVAILABLE and _sock is not None:
                             session.write((obj.get("data") or "").encode("utf-8"))
                         elif t == "resize":
                             session.resize(int(obj.get("cols", 80)), int(obj.get("rows", 24)))
+                        elif t == "cwd":
+                            ws.send(json.dumps({
+                                "type": "cwd",
+                                "requestId": obj.get("requestId"),
+                                "cwd": session.cwd(),
+                            }))
                         elif t == "ping":
                             ws.send(json.dumps({"type": "pong"}))
                     except (json.JSONDecodeError, TypeError):
@@ -552,10 +779,7 @@ def _openai_stream_to_anthropic_sse(resp, model):
 
 
 def _claude_proxy_openai_url(base_url):
-    b = (base_url or '').rstrip('/')
-    if b.endswith('/chat/completions'):
-        return b
-    return f"{b}/chat/completions"
+    return _openai_endpoint(base_url, 'chat/completions')
 
 
 @app.route('/claude-proxy/v1/messages', methods=['POST'])
@@ -570,7 +794,7 @@ def claude_proxy_messages():
     # ---- Anthropic 型 provider：直接透传到真实 Anthropic 端点 ----
     if prov['apiType'] == 'anthropic':
         url = _anthropic_endpoint(prov['baseUrl'], 'messages')
-        headers = _anthropic_headers(prov['apiKey'])
+        headers = _anthropic_headers(prov['apiKey'], prov['baseUrl'])
         beta = request.headers.get('anthropic-beta')
         if beta:
             headers['anthropic-beta'] = beta
@@ -613,9 +837,7 @@ def claude_proxy_messages():
     payload = _claude_proxy_build_openai_payload(body, model, with_stream_options=use_stream_opts)
 
     url = _claude_proxy_openai_url(base)
-    headers = {'Content-Type': 'application/json'}
-    if prov['apiKey']:
-        headers['Authorization'] = f"Bearer {prov['apiKey']}"
+    headers = _openai_headers(base, prov['apiKey'])
 
     def _do_post(pl, want_stream):
         if want_stream:
@@ -1134,6 +1356,23 @@ def _hermes_cli_path():
     return shutil.which('hermes')
 
 
+def _hermes_python_path(cli_path=None):
+    """Return a Python interpreter that can import the installed Hermes package."""
+    candidates = [
+        os.path.expanduser('~/.hermes/hermes-agent/venv/bin/python3'),
+        os.path.expanduser('~/.hermes/hermes-agent/venv/bin/python'),
+    ]
+    if cli_path:
+        candidates.extend([
+            os.path.join(os.path.dirname(cli_path), 'python3'),
+            os.path.join(os.path.dirname(cli_path), 'python'),
+        ])
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return sys.executable
+
+
 def _hermes_prepare_runtime(provider=None, model=None):
     """为 hermes 子进程准备 HERMES_HOME（config.yaml 指向本地 hermes-proxy）。"""
     import shutil
@@ -1198,9 +1437,7 @@ def hermes_proxy_chat():
     stream = bool(body.get('stream'))
     body['model'] = prov['model'] or body.get('model')
     url = _claude_proxy_openai_url(prov['baseUrl'])
-    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-    if prov['apiKey']:
-        headers['Authorization'] = f"Bearer {prov['apiKey']}"
+    headers = _openai_headers(prov['baseUrl'], prov['apiKey'], accept=True)
     try:
         if stream:
             r = http_requests.post(url, headers=headers, json=body, stream=True, timeout=600)
@@ -1228,7 +1465,7 @@ def hermes_proxy_chat():
 
 
 class _HermesSession:
-    """Hermes 结构化会话：每轮 hermes chat -q ... -Q，用 --resume 续接。"""
+    """Hermes 结构化会话：最终回答走 quiet stdout，工具过程走 JSONL 事件管道。"""
 
     def __init__(self, send_json, cwd, model=None, provider=None):
         self.send_json = send_json
@@ -1243,6 +1480,7 @@ class _HermesSession:
         self.alive = False
         self._lock = threading.Lock()
         self._running = False
+        self._proc = None
 
     def start(self):
         cli = _hermes_cli_path()
@@ -1274,7 +1512,12 @@ class _HermesSession:
         if not cli:
             self.send_json({"type": "error", "error": "未找到 hermes CLI"})
             return
-        cmd = [cli, 'chat', '-q', text or '', '-Q', '--yolo', '--accept-hooks', '--source', 'tool']
+        event_runner = os.path.join(BASE_DIR, 'hermes_event_runner.py')
+        cmd = [
+            _hermes_python_path(cli), event_runner,
+            'chat', '-q', text or '', '-Q',
+            '--yolo', '--accept-hooks', '--source', 'tool',
+        ]
         if self.via_proxy and self.model:
             cmd += ['-m', self.model, '--provider', 'custom']
         if self.session_id:
@@ -1287,41 +1530,185 @@ class _HermesSession:
             self._running = True
         threading.Thread(target=self._run_query, args=(cmd, env), daemon=True).start()
 
-    def _run_query(self, cmd, env):
+    @staticmethod
+    def _progress_phase(tool):
+        name = (tool or '').lower()
+        if any(part in name for part in ('search', 'browser', 'web', 'ddg', 'wikipedia')):
+            return 'search'
+        if any(part in name for part in ('terminal', 'shell', 'command', 'python', 'execute')):
+            return 'command'
+        if any(part in name for part in ('file', 'read', 'write', 'patch', 'edit', 'directory')):
+            return 'file'
+        return 'tool'
+
+    def _send_progress(self, event):
+        event_type = str(event.get('event') or '')
+        tool = str(event.get('tool') or '').strip()
+        phase = self._progress_phase(tool)
+        completed = event_type == 'tool.completed'
+        failed = bool(event.get('isError'))
+        labels = {
+            'search': ('正在搜索', '搜索完成'),
+            'command': ('正在执行', '执行完成'),
+            'file': ('正在处理文件', '文件处理完成'),
+            'tool': ('正在调用工具', '工具调用完成'),
+        }
+        title = labels[phase][1 if completed else 0]
+        if failed:
+            title = f'{title}（失败）'
+        detail = (
+            event.get('result') if completed
+            else event.get('preview') or event.get('args')
+        )
+        payload = {
+            'type': 'progress',
+            'phase': phase,
+            'status': 'error' if failed else ('completed' if completed else 'started'),
+            'title': title,
+            'tool': tool,
+            'detail': str(detail or '').strip()[:1800],
+            'urls': event.get('urls') or [],
+        }
+        if completed:
+            payload['duration'] = event.get('duration') or 0
+        self.send_json(payload)
+        _log_interaction(
+            'hermes.progress', phase=phase, status=payload['status'],
+            tool=tool, detail=payload['detail'], urls=payload['urls'],
+        )
+
+    def _read_final_answer(self, session_id):
+        if not session_id or not self.hermes_home:
+            return ''
+        db_path = os.path.join(self.hermes_home, 'state.db')
+        if not os.path.isfile(db_path):
+            return ''
         try:
-            proc = subprocess.run(
-                cmd, cwd=self.cwd, env=env, capture_output=True, text=True, timeout=900,
+            conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=5)
+            try:
+                row = conn.execute(
+                    "SELECT content FROM messages "
+                    "WHERE session_id = ? AND role = 'assistant' AND active = 1 "
+                    "ORDER BY id DESC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            content = row[0] if row else ''
+            if not isinstance(content, str):
+                return str(content or '').strip()
+            stripped = content.strip()
+            if stripped.startswith('['):
+                try:
+                    parts = json.loads(stripped)
+                    if isinstance(parts, list):
+                        texts = [
+                            part.get('text', '') for part in parts
+                            if isinstance(part, dict) and isinstance(part.get('text'), str)
+                        ]
+                        if texts:
+                            return '\n'.join(texts).strip()
+                except (ValueError, TypeError):
+                    pass
+            return stripped
+        except sqlite3.Error as exc:
+            logger.warning('读取 Hermes 最终回答失败 session=%s: %s', session_id, exc)
+            return ''
+
+    def _run_query(self, cmd, env):
+        event_r = event_w = None
+        event_thread = None
+        try:
+            event_r, event_w = os.pipe()
+            env = dict(env)
+            env['HERMES_EVENT_FD'] = str(event_w)
+            proc = subprocess.Popen(
+                cmd, cwd=self.cwd, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, pass_fds=(event_w,),
             )
-            out = proc.stdout or ''
-            err = proc.stderr or ''
+            self._proc = proc
+            os.close(event_w)
+            event_w = None
+
+            def consume_events():
+                try:
+                    with os.fdopen(event_r, 'r', encoding='utf-8', errors='replace') as stream:
+                        for line in stream:
+                            try:
+                                event = json.loads(line)
+                                if isinstance(event, dict):
+                                    self._send_progress(event)
+                            except (ValueError, TypeError):
+                                logger.debug('忽略无法解析的 Hermes 进度事件: %r', line[:300])
+                except OSError:
+                    pass
+
+            event_thread = threading.Thread(target=consume_events, daemon=True)
+            event_thread.start()
+            event_r = None
+
+            try:
+                out, err = proc.communicate(timeout=900)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+                err = (err or '') + '\nHermes 响应超时（900 秒）'
+
+            if event_thread:
+                event_thread.join(timeout=3)
+
             sid = self.session_id
-            body_lines = []
-            for line in out.splitlines():
-                s = line.strip()
-                if s.startswith('session_id:'):
-                    sid = s.split(':', 1)[1].strip()
-                elif s:
-                    body_lines.append(line)
+            err_lines = []
+            for line in (err or '').splitlines():
+                stripped = line.strip()
+                if stripped.startswith('session_id:'):
+                    sid = stripped.split(':', 1)[1].strip() or sid
+                elif stripped:
+                    err_lines.append(line)
             self.session_id = sid
-            text = '\n'.join(body_lines).strip()
-            if text:
-                self.send_json({"type": "response", "text": text, "session_id": sid})
-            if err.strip():
-                self.send_json({"type": "stderr", "data": err.strip()})
-            if proc.returncode != 0 and not text:
+            answer = self._read_final_answer(sid) or (out or '').strip()
+            clean_err = '\n'.join(err_lines).strip()
+            if answer:
+                self.send_json({'type': 'response', 'text': answer, 'session_id': sid})
+                _log_interaction(
+                    'hermes.response', session_id=sid, model=self.model,
+                    provider=self.provider_name, response=answer,
+                )
+            if clean_err:
+                self.send_json({'type': 'stderr', 'data': clean_err})
+            if proc.returncode != 0 and not answer:
                 self.send_json({
-                    "type": "error",
-                    "error": (err or f"hermes 退出码 {proc.returncode}").strip()[:2000],
+                    'type': 'error',
+                    'error': (clean_err or f'hermes 退出码 {proc.returncode}')[:2000],
                 })
         except Exception as e:
-            self.send_json({"type": "error", "error": str(e)})
+            self.send_json({'type': 'error', 'error': str(e)})
+            logger.exception('Hermes 结构化会话执行失败')
         finally:
+            self._proc = None
+            if event_w is not None:
+                try:
+                    os.close(event_w)
+                except OSError:
+                    pass
+            if event_r is not None:
+                try:
+                    os.close(event_r)
+                except OSError:
+                    pass
             with self._lock:
                 self._running = False
-            self.send_json({"type": "done"})
+            self.send_json({'type': 'done'})
 
     def close(self, cleanup_only=False):
         self.alive = False
+        proc = self._proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
         if self.token:
             _unregister_claude_provider(self.token)
             self.token = None
@@ -2604,6 +2991,15 @@ def put_state():
         "activeConversationId": data.get("activeConversationId"),
         "activeProviderId": data.get("activeProviderId"),
     }
+    providers = state['providers'] if isinstance(state['providers'], list) else []
+    defaults = [p for p in providers if isinstance(p, dict) and p.get('isDefault')]
+    if providers and not defaults:
+        providers[0]['isDefault'] = True
+    elif len(defaults) > 1:
+        keep = defaults[0].get('id')
+        for p in providers:
+            if isinstance(p, dict) and p.get('id') != keep:
+                p['isDefault'] = False
 
     if save_state(state):
         logger.info(f"State saved: {len(state['providers'])} providers, "
@@ -2637,6 +3033,8 @@ def add_provider():
         "name": data['name'],
         "baseUrl": data['baseUrl'].rstrip('/'),
         "apiKey": data['apiKey'],
+        "apiType": _norm_api_type(data.get('apiType')),
+        "isDefault": bool(data.get('isDefault', False)),
         "models": data.get('models', []),
         "selectedModel": data.get('selectedModel', ''),
     }
@@ -2647,6 +3045,13 @@ def add_provider():
         state['providers'][existing_idx] = provider
     else:
         state['providers'].append(provider)
+
+    if provider['isDefault']:
+        for item in state['providers']:
+            if item.get('id') != provider['id']:
+                item['isDefault'] = False
+    elif not any(item.get('isDefault') for item in state['providers']):
+        state['providers'][0]['isDefault'] = True
 
     state['activeProviderId'] = provider['id']
     save_state(state)
@@ -2769,19 +3174,87 @@ def _norm_api_type(api_type):
     return 'anthropic' if str(api_type or '').lower() == 'anthropic' else 'openai'
 
 
+def _openai_endpoint(base_url, path):
+    """Build an OpenAI-compatible endpoint from a configured base URL.
+
+    Most compatible providers accept ``{base}/{path}``, while QuickRouter's
+    public API lives below ``/v1`` even when the provider is configured with
+    its bare API origin. Also accept users configuring either ``.../v1`` or
+    the complete endpoint, without appending the path twice.
+    """
+    b = (base_url or '').rstrip('/')
+    clean_path = str(path or '').strip('/')
+    if not clean_path:
+        return b
+    if b.endswith(f'/{clean_path}'):
+        return b
+    if b.endswith('/v1'):
+        return f"{b}/{clean_path}"
+
+    try:
+        parsed = urlparse(b)
+        host = (parsed.hostname or '').lower()
+        configured_path = (parsed.path or '').rstrip('/')
+    except Exception:
+        host = ''
+        configured_path = ''
+    if host == 'api.quickrouter.ai' and not configured_path:
+        return f"{b}/v1/{clean_path}"
+    return f"{b}/{clean_path}"
+
+
+def _api_key_value(api_key):
+    """Return the configured key without imposing a provider-specific format.
+
+    API keys are opaque values.  In particular, MiMo deployments may issue
+    credentials whose prefix is not one of the examples in their docs, so the
+    server must never validate or rewrite the prefix supplied by the user.
+    """
+    return str(api_key or '').strip()
+
+
+def _is_xiaomi_mimo_baseurl(base_url):
+    """MiMo's OpenAI-compatible gateway authenticates with ``api-key``."""
+    try:
+        host = (urlparse(str(base_url or '')).hostname or '').lower().rstrip('.')
+    except Exception:
+        return False
+    return host == 'xiaomimimo.com' or host.endswith('.xiaomimimo.com')
+
+
+def _openai_headers(base_url, api_key, *, accept=False):
+    """Build provider headers, including Xiaomi MiMo's non-standard auth name."""
+    headers = {'Content-Type': 'application/json'}
+    if accept:
+        headers['Accept'] = 'application/json'
+    key = _api_key_value(api_key)
+    if key:
+        if _is_xiaomi_mimo_baseurl(base_url):
+            headers['api-key'] = key
+        else:
+            headers['Authorization'] = f'Bearer {key}'
+    return headers
+
+
 def _anthropic_endpoint(base_url, path):
     """根据配置的 baseUrl 推导 Anthropic 端点。
-    兼容 baseUrl 末尾带或不带 /v1 的情况，始终输出 {host}/v1/{path}。"""
+    兼容末尾带或不带 /v1，也接受用户直接填写完整的 /messages 端点。"""
     b = (base_url or '').rstrip('/')
+    clean_path = str(path or '').strip('/')
+    if b.endswith(f'/{clean_path}'):
+        return b
     if b.endswith('/v1'):
         b = b[:-3].rstrip('/')
-    return f"{b}/v1/{path}"
+    return f"{b}/v1/{clean_path}"
 
 
-def _anthropic_headers(api_key):
+def _anthropic_headers(api_key, base_url=''):
     h = {'Content-Type': 'application/json', 'anthropic-version': ANTHROPIC_VERSION}
-    if api_key:
-        h['x-api-key'] = api_key
+    key = _api_key_value(api_key)
+    if key:
+        # MiMo documents ``api-key`` for both its OpenAI and Anthropic
+        # compatible gateways; native Anthropic keeps using ``x-api-key``.
+        h['api-key' if _is_xiaomi_mimo_baseurl(base_url) else 'x-api-key'] = key
     return h
 
 
@@ -2966,13 +3439,15 @@ def fetch_models():
     try:
         if api_type == 'anthropic':
             url = _anthropic_endpoint(base_url, 'models')
-            headers = _anthropic_headers(api_key)
+            headers = _anthropic_headers(api_key, base_url)
         else:
-            url = f"{base_url}/models"
-            headers = {'Content-Type': 'application/json'}
-            if api_key:
-                headers['Authorization'] = f'Bearer {api_key}'
+            url = _openai_endpoint(base_url, 'models')
+            headers = _openai_headers(base_url, api_key)
         resp = http_requests.get(url, headers=headers, timeout=30)
+        if resp.status_code == 401 and _is_xiaomi_mimo_baseurl(base_url):
+            return jsonify({
+                "error": "小米 MiMo 鉴权失败：API Key 未被服务端接受，请确认 API Key、Base URL/区域和账号权限后重试。"
+            }), 401
         resp.raise_for_status()
         result = resp.json()
         models = sorted([m['id'] for m in result.get('data', [])])
@@ -2987,10 +3462,15 @@ def fetch_models():
 # API Routes - Web Search (for 联网搜索 / latest info)
 # ============================================================
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     _DDGS_AVAILABLE = True
 except ImportError:
-    _DDGS_AVAILABLE = False
+    try:
+        # 兼容已安装的旧包；新环境统一安装 ddgs。
+        from duckduckgo_search import DDGS
+        _DDGS_AVAILABLE = True
+    except ImportError:
+        _DDGS_AVAILABLE = False
 
 
 # ---------------- 网页正文抓取 ----------------
@@ -3072,10 +3552,133 @@ def api_fetch_page():
     return jsonify(_fetch_page_text(url, timeout=timeout, max_chars=max_chars))
 
 
+def _csp_frame_ancestors(csp_header: str):
+    """从 CSP 头解析 frame-ancestors 指令的 token 列表；无该指令则返回 None。"""
+    if not csp_header:
+        return None
+    for part in csp_header.split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        low = part.lower()
+        if low.startswith('frame-ancestors'):
+            rest = part.split(None, 1)
+            if len(rest) < 2:
+                return []
+            return rest[1].split()
+    return None
+
+
+def _frame_ancestors_allows(tokens, embedder_origin: str, target_origin: str) -> bool:
+    if tokens is None:
+        return True  # 无 frame-ancestors 时不据此拒绝（仍可能被 XFO 拦）
+    if not tokens or any(t.lower() == "'none'" for t in tokens):
+        return False
+    if any(t == '*' for t in tokens):
+        return True
+    embedder = (embedder_origin or '').rstrip('/')
+    target = (target_origin or '').rstrip('/')
+    for t in tokens:
+        tl = t.lower()
+        if tl == "'self'" and embedder and target and embedder == target:
+            return True
+        if t.startswith('http://') or t.startswith('https://'):
+            if embedder == t.rstrip('/') or embedder.startswith(t.rstrip('/') + '/'):
+                return True
+            # 允许 scheme://host 形式匹配
+            try:
+                from urllib.parse import urlparse
+                et = urlparse(embedder)
+                pt = urlparse(t)
+                if pt.scheme and pt.netloc and et.scheme == pt.scheme and et.netloc == pt.netloc:
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+def _check_url_frameable(url: str, embedder_origin: str = ''):
+    """探测目标页是否允许被 iframe 嵌入。返回 {frameable, reason, final_url}。"""
+    out = {'frameable': True, 'reason': '', 'final_url': url}
+    if not url or not re.match(r'^https?://', url, re.I):
+        out['frameable'] = False
+        out['reason'] = 'invalid url'
+        return out
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0',
+        'Accept': 'text/html,application/xhtml+xml',
+    }
+    resp = None
+    try:
+        try:
+            resp = http_requests.head(url, headers=headers, timeout=8, allow_redirects=True)
+            # 部分站点对 HEAD 返回 405/403，改 GET
+            if resp.status_code in (403, 405, 501) or not resp.headers:
+                resp.close()
+                resp = None
+        except Exception:
+            resp = None
+        if resp is None:
+            resp = http_requests.get(url, headers=headers, timeout=8, allow_redirects=True, stream=True)
+        out['final_url'] = str(resp.url or url)
+        rh = {k.lower(): v for k, v in resp.headers.items()}
+        xfo = (rh.get('x-frame-options') or '').strip()
+        if xfo:
+            xu = xfo.upper()
+            if 'DENY' in xu:
+                out['frameable'] = False
+                out['reason'] = f'X-Frame-Options: {xfo}'
+                return out
+            if 'SAMEORIGIN' in xu:
+                out['frameable'] = False
+                out['reason'] = f'X-Frame-Options: {xfo}'
+                return out
+        csp = rh.get('content-security-policy') or ''
+        tokens = _csp_frame_ancestors(csp)
+        if tokens is not None:
+            from urllib.parse import urlparse
+            target_origin = ''
+            try:
+                p = urlparse(out['final_url'])
+                target_origin = f'{p.scheme}://{p.netloc}'
+            except Exception:
+                pass
+            if not _frame_ancestors_allows(tokens, embedder_origin, target_origin):
+                out['frameable'] = False
+                out['reason'] = f"CSP frame-ancestors: {' '.join(tokens)}"
+                return out
+        return out
+    except Exception as e:
+        # 探测失败时保守：仍尝试嵌入，由前端处理空白页
+        out['reason'] = f'check failed: {e}'
+        return out
+    finally:
+        try:
+            if resp is not None:
+                resp.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/web/frame-check', methods=['GET'])
+def api_web_frame_check():
+    """检查 URL 是否允许被本应用 iframe 嵌入。?url=https://..."""
+    url = (request.args.get('url') or '').strip()
+    if not url:
+        return jsonify({'error': 'url is required'}), 400
+    if not re.match(r'^https?://', url, re.I):
+        url = 'https://' + url
+    embedder = (request.headers.get('Origin') or '').strip()
+    if not embedder:
+        embedder = (request.host_url or '').rstrip('/')
+    result = _check_url_frameable(url, embedder_origin=embedder)
+    return jsonify(result)
+
+
 # ---------------- 多 provider Web 搜索 ----------------
 _WS_PROVIDER_INFO = [
     {'id': 'duckduckgo', 'name': 'DuckDuckGo', 'requires_key': False,
-     'website': 'https://duckduckgo.com', 'note': '免费，无需 API key（pip install duckduckgo-search）'},
+     'website': 'https://duckduckgo.com', 'note': '免费，无需 API key（pip install ddgs）'},
     {'id': 'tavily', 'name': 'Tavily', 'requires_key': True, 'key_field': 'tavily',
      'website': 'https://tavily.com', 'note': '为 LLM 优化；1000 次/月免费'},
     {'id': 'serper', 'name': 'Serper (Google)', 'requires_key': True, 'key_field': 'serper',
@@ -3113,8 +3716,13 @@ def _ws_apply_site_filter(query, preferred_sites):
 
 def _ws_duckduckgo(query, max_results, region=None):
     if not _DDGS_AVAILABLE:
-        raise RuntimeError('duckduckgo-search 未安装：pip install duckduckgo-search')
-    items = list(DDGS().text(query, max_results=max_results, region=region or 'wt-wt'))
+        raise RuntimeError('ddgs 未安装：pip install ddgs')
+    # duckduckgo-search 旧版常用 wt-wt 表示“全球”；新版 ddgs 要求
+    # country-language（如 cn-zh、us-en）。wt-wt 会错误访问 wt.wikipedia.org。
+    ddgs_region = str(region or 'cn-zh').strip().lower()
+    if ddgs_region in ('wt-wt', 'wt', 'global', 'auto') or not re.match(r'^[a-z]{2}-[a-z]{2,3}$', ddgs_region):
+        ddgs_region = 'cn-zh'
+    items = list(DDGS().text(query, max_results=max_results, region=ddgs_region))
     return [{'title': r.get('title', ''), 'url': r.get('href', ''), 'snippet': r.get('body', '')}
             for r in (items or [])]
 
@@ -3481,16 +4089,14 @@ def chat_proxy():
     if api_type == 'anthropic':
         # Claude 原生 Messages API：单独构造 URL / 鉴权头 / 请求体
         url = _anthropic_endpoint(base_url, 'messages')
-        headers = _anthropic_headers(api_key)
+        headers = _anthropic_headers(api_key, base_url)
         payload = _build_anthropic_payload(
             model, messages, stream=stream, max_tokens=max_tokens,
             temperature=temperature, top_p=top_p, stop=stop,
         )
     else:
-        url = f"{base_url}/chat/completions"
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
+        url = _openai_endpoint(base_url, 'chat/completions')
+        headers = _openai_headers(base_url, api_key)
 
         payload = {
             'model': model,
@@ -3519,11 +4125,29 @@ def chat_proxy():
                 payload['stop'] = [str(x) for x in stop if str(x).strip()][:4]
             elif isinstance(stop, str) and stop.strip():
                 payload['stop'] = [stop.strip()]
+        # DeepSeek V4 等兼容接口支持显式关闭思考。只接受固定枚举，避免任意扩展参数透传。
+        thinking = data.get('thinking')
+        if isinstance(thinking, dict) and thinking.get('type') in ('enabled', 'disabled'):
+            payload['thinking'] = {'type': thinking['type']}
         # 流式模式下请求最后一帧带 usage（OpenAI 兼容；不支持的 provider 会忽略）
         if stream:
             payload['stream_options'] = {'include_usage': True}
 
     logger.info(f"Chat request: type={api_type}, model={model}, messages={len(messages)}, stream={stream}")
+    interaction_id = uuid.uuid4().hex
+    started_at = time.monotonic()
+    flow = request.path
+    _log_interaction(
+        'llm.request',
+        interaction_id=interaction_id,
+        flow=flow,
+        api_type=api_type,
+        base_url=base_url,
+        model=model,
+        stream=bool(stream),
+        messages=messages,
+        body=payload,
+    )
 
     max_retries = 3
     retry_codes = (429, 503)
@@ -3535,6 +4159,9 @@ def chat_proxy():
         if stream:
             def generate():
                 resp = None
+                response_parts = []
+                stream_error = None
+                response_status = None
                 try:
                     for attempt in range(max_retries + 1):
                         resp = do_request(stream_req=True)
@@ -3548,21 +4175,39 @@ def chat_proxy():
                             time.sleep(delay)
                             continue
                         break
+                    response_status = resp.status_code if resp is not None else 0
                     if resp is None or resp.status_code >= 400:
                         err_text = (resp.text[:500] if resp and resp.text else (resp.reason if resp else 'Unknown')) or ''
-                        yield f"data: {json.dumps({'error': f'{resp.status_code if resp else 0} {err_text}'})}\n\n"
+                        stream_error = f'{response_status} {err_text}'
+                        yield f"data: {json.dumps({'error': stream_error})}\n\n"
                         return
                     if api_type == 'anthropic':
                         # 把 Claude SSE 翻译为 OpenAI 兼容 SSE，前端无需区分
                         for frame in _anthropic_stream_to_openai(resp, model):
+                            response_parts.append(_sse_content(frame))
                             yield frame
                     else:
                         for line in resp.iter_lines():
                             if line:
-                                yield line.decode('utf-8') + '\n'
+                                frame = line.decode('utf-8') + '\n'
+                                response_parts.append(_sse_content(frame))
+                                yield frame
                 except http_requests.exceptions.RequestException as e:
-                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                    stream_error = str(e)
+                    yield f"data: {json.dumps({'error': stream_error})}\n\n"
                 finally:
+                    event = 'llm.error' if stream_error else 'llm.response'
+                    _log_interaction(
+                        event,
+                        interaction_id=interaction_id,
+                        flow=flow,
+                        model=model,
+                        stream=True,
+                        status=response_status,
+                        elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+                        response=''.join(response_parts),
+                        error=stream_error,
+                    )
                     if resp is not None:
                         try:
                             resp.close()
@@ -3587,12 +4232,30 @@ def chat_proxy():
                     continue
                 break
             resp.raise_for_status()
-            if api_type == 'anthropic':
-                return jsonify(_anthropic_json_to_openai(resp.json(), model))
-            return jsonify(resp.json())
+            result = (_anthropic_json_to_openai(resp.json(), model)
+                      if api_type == 'anthropic' else resp.json())
+            _log_interaction(
+                'llm.response',
+                interaction_id=interaction_id,
+                flow=flow,
+                model=model,
+                status=resp.status_code,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+                usage=result.get('usage') if isinstance(result, dict) else None,
+                response=result,
+            )
+            return jsonify(result)
 
     except http_requests.exceptions.RequestException as e:
         logger.error(f"Chat proxy error: {e}")
+        _log_interaction(
+            'llm.error',
+            interaction_id=interaction_id,
+            flow=flow,
+            model=model,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+            error=str(e),
+        )
         return jsonify({"error": str(e)}), 500
 
 
@@ -3629,7 +4292,7 @@ def test_connection():
         return jsonify({"ok": False, "error": "model is required for test"}), 400
     if api_type == 'anthropic':
         url = _anthropic_endpoint(base_url, 'messages')
-        headers = _anthropic_headers(api_key)
+        headers = _anthropic_headers(api_key, base_url)
         payload = {
             'model': model,
             'messages': [{'role': 'user', 'content': 'Hi'}],
@@ -3637,8 +4300,8 @@ def test_connection():
             'max_tokens': 5,
         }
     else:
-        url = f"{base_url}/chat/completions"
-        headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
+        url = _openai_endpoint(base_url, 'chat/completions')
+        headers = _openai_headers(base_url, api_key)
         payload = {
             'model': model,
             'messages': [{'role': 'user', 'content': 'Hi'}],
@@ -3999,10 +4662,8 @@ def _salvage_truncated_script_json(text, pref_lang=''):
     }
 
 
-def _llm_chat_full(base_url, api_key, model, system_prompt, user_prompt, max_tokens=2000, temperature=0.2, extra_messages=None, api_type='openai'):
-    """单轮非流式 chat completion，返回 (content, finish_reason)。
-    extra_messages: 可选追加 assistant/user 消息列表，方便多轮接续场景。
-    api_type: 'openai'（默认，/chat/completions）或 'anthropic'（Claude /v1/messages）。"""
+def _llm_chat_full(base_url, api_key, model, system_prompt, user_prompt, max_tokens=2000, temperature=0.2, extra_messages=None, api_type='openai', request_options=None):
+    """单轮非流式 chat completion，返回 (content, finish_reason)，并记录完整交互日志。"""
     messages = [
         {'role': 'system', 'content': system_prompt},
         {'role': 'user', 'content': user_prompt},
@@ -4010,35 +4671,143 @@ def _llm_chat_full(base_url, api_key, model, system_prompt, user_prompt, max_tok
     if extra_messages:
         messages.extend(extra_messages)
 
-    if _norm_api_type(api_type) == 'anthropic':
-        url = _anthropic_endpoint(base_url, 'messages')
-        headers = _anthropic_headers(api_key)
-        payload = _build_anthropic_payload(
-            model, messages, stream=False, max_tokens=max_tokens, temperature=temperature,
-        )
-        resp = http_requests.post(url, json=payload, headers=headers, timeout=180)
-        resp.raise_for_status()
-        data = _anthropic_json_to_openai(resp.json(), model)
-    else:
-        url = f"{base_url.rstrip('/')}/chat/completions"
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-        payload = {
-            'model': model,
-            'messages': messages,
-            'stream': False,
-            'temperature': temperature,
-            'max_tokens': max_tokens,
-        }
-        resp = http_requests.post(url, json=payload, headers=headers, timeout=180)
-        resp.raise_for_status()
-        data = resp.json()
-    choice = (data.get('choices') or [{}])[0]
-    content = choice.get('message', {}).get('content', '') or ''
-    finish_reason = choice.get('finish_reason') or ''
-    return content, finish_reason
+    normalized_type = _norm_api_type(api_type)
+    interaction_id = uuid.uuid4().hex
+    started_at = time.monotonic()
+    flow = request.path if has_request_context() else 'internal'
+    _log_interaction(
+        'llm.request',
+        interaction_id=interaction_id,
+        flow=flow,
+        api_type=normalized_type,
+        base_url=base_url,
+        model=model,
+        stream=False,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        request_options=request_options or {},
+        messages=messages,
+    )
 
+    try:
+        if normalized_type == 'anthropic':
+            url = _anthropic_endpoint(base_url, 'messages')
+            headers = _anthropic_headers(api_key, base_url)
+            payload = _build_anthropic_payload(
+                model, messages, stream=False, max_tokens=max_tokens, temperature=temperature,
+            )
+            resp = http_requests.post(url, json=payload, headers=headers, timeout=180)
+            resp.raise_for_status()
+            data = _anthropic_json_to_openai(resp.json(), model)
+        else:
+            url = _openai_endpoint(base_url, 'chat/completions')
+            headers = _openai_headers(base_url, api_key)
+            payload = {
+                'model': model,
+                'messages': messages,
+                'stream': False,
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+            }
+            if request_options:
+                reserved = {'model', 'messages', 'stream', 'temperature', 'max_tokens'}
+                conflict = reserved.intersection(request_options)
+                if conflict:
+                    raise ValueError(f"request_options cannot override reserved fields: {sorted(conflict)}")
+                payload.update(request_options)
+            resp = http_requests.post(url, json=payload, headers=headers, timeout=180)
+            resp.raise_for_status()
+            data = resp.json()
+        choice = (data.get('choices') or [{}])[0]
+        content = choice.get('message', {}).get('content', '') or ''
+        finish_reason = choice.get('finish_reason') or ''
+        _log_interaction(
+            'llm.response',
+            interaction_id=interaction_id,
+            flow=flow,
+            model=model,
+            status=getattr(resp, 'status_code', 200),
+            elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+            finish_reason=finish_reason,
+            usage=data.get('usage'),
+            response=content,
+        )
+        return content, finish_reason
+    except Exception as exc:
+        _log_interaction(
+            'llm.error',
+            interaction_id=interaction_id,
+            flow=flow,
+            model=model,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+            error=str(exc),
+        )
+        raise
+
+
+
+def _llm_json_chat_full(base_url, api_key, model, system_prompt, user_prompt, max_tokens=2000, temperature=0.2, extra_messages=None, api_type='openai'):
+    """生成结构化 JSON；DeepSeek V4 关闭默认思考，避免输出预算被 reasoning 耗尽。
+
+    OpenAI 兼容网关对扩展参数的支持不一致，因此参数被拒绝或返回空正文时会自动降级。
+    返回值与 ``_llm_chat_full`` 一致。
+    """
+    normalized_type = _norm_api_type(api_type)
+    model_lower = (model or '').lower()
+    is_deepseek_v4 = model_lower.startswith('deepseek-v4')
+
+    if normalized_type == 'anthropic':
+        variants = [('plain', None)]
+    elif is_deepseek_v4:
+        variants = [
+            ('nonthinking-json', {
+                'thinking': {'type': 'disabled'},
+                'response_format': {'type': 'json_object'},
+            }),
+            ('nonthinking', {'thinking': {'type': 'disabled'}}),
+            ('plain', None),
+        ]
+    else:
+        variants = [
+            ('json', {'response_format': {'type': 'json_object'}}),
+            ('plain', None),
+        ]
+
+    last_empty = ('', '')
+    last_error = None
+    for index, (mode, options) in enumerate(variants):
+        try:
+            content, finish_reason = _llm_chat_full(
+                base_url, api_key, model, system_prompt, user_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                extra_messages=extra_messages,
+                api_type=api_type,
+                request_options=options,
+            )
+        except http_requests.exceptions.RequestException as exc:
+            last_error = exc
+            if index + 1 < len(variants):
+                logger.warning(
+                    "structured LLM mode %s rejected for model=%s; retrying with fallback: %s",
+                    mode, model, exc,
+                )
+                continue
+            raise
+
+        if content and content.strip():
+            return content, finish_reason
+
+        last_empty = (content or '', finish_reason)
+        if index + 1 < len(variants):
+            logger.warning(
+                "structured LLM mode %s returned empty content for model=%s, finish_reason=%r; retrying",
+                mode, model, finish_reason,
+            )
+
+    if last_error and not any(last_empty):
+        raise last_error
+    return last_empty
 
 def _llm_chat(base_url, api_key, model, system_prompt, user_prompt, max_tokens=2000, temperature=0.2, api_type='openai'):
     """向后兼容包装：仅返回 content。"""
@@ -4312,7 +5081,7 @@ def agent_plan():
         "language 从 python/node/go/c/cpp/java/rust/bash 中选最合适的一个；若是通用脚本/运维类任务用 bash 或 python。"
     )
     try:
-        ai_text = _llm_chat(base_url, api_key, model, _AGENT_PLAN_SYSTEM, user_prompt, max_tokens=1500)
+        ai_text, _ = _llm_json_chat_full(base_url, api_key, model, _AGENT_PLAN_SYSTEM, user_prompt, max_tokens=1500)
     except http_requests.exceptions.RequestException as e:
         logger.error(f"agent_plan LLM error: {e}")
         return jsonify({"error": str(e)}), 502
@@ -4354,7 +5123,7 @@ def agent_script():
     lang_hint = f"\n首选语言: {pref_lang}" if pref_lang in ('bash', 'python') else ""
     user_prompt = f"任务: {goal}\n步骤:\n{steps_text}{lang_hint}\n请输出 JSON。"
     try:
-        ai_text, finish_reason = _llm_chat_full(base_url, api_key, model, _AGENT_SCRIPT_SYSTEM, user_prompt, max_tokens=8000)
+        ai_text, finish_reason = _llm_json_chat_full(base_url, api_key, model, _AGENT_SCRIPT_SYSTEM, user_prompt, max_tokens=8000)
     except http_requests.exceptions.RequestException as e:
         logger.error(f"agent_script LLM error: {e}")
         return jsonify({"error": str(e)}), 502
@@ -4399,7 +5168,7 @@ def agent_script():
                 "{\"language\":..., \"script\":..., \"parameters\":[...], \"reason\":\"修复点摘要\"}）。"
             )
             try:
-                ai_fix, _ = _llm_chat_full(
+                ai_fix, _ = _llm_json_chat_full(
                     base_url, api_key, model, _AGENT_FIX_SYSTEM, fix_user, max_tokens=8000
                 )
                 fix_parsed = (
@@ -4463,7 +5232,7 @@ def agent_refine():
         "请基于这些信息生成下一版脚本，输出 JSON。"
     )
     try:
-        ai_text, finish_reason = _llm_chat_full(base_url, api_key, model, _AGENT_REFINE_SYSTEM, user_prompt, max_tokens=8000)
+        ai_text, finish_reason = _llm_json_chat_full(base_url, api_key, model, _AGENT_REFINE_SYSTEM, user_prompt, max_tokens=8000)
     except http_requests.exceptions.RequestException as e:
         logger.error(f"agent_refine LLM error: {e}")
         return jsonify({"error": str(e)}), 502
@@ -4661,7 +5430,7 @@ def agent_project():
     lang_hint = f"\n推荐语言: {pref_lang}" if pref_lang else ""
     user_prompt = f"任务: {goal}\n开发计划:\n{steps_text}{lang_hint}\n请生成工程化项目，输出 JSON。"
     try:
-        ai_text, finish_reason = _llm_chat_full(base_url, api_key, model, _AGENT_PROJECT_SYSTEM, user_prompt, max_tokens=12000)
+        ai_text, finish_reason = _llm_json_chat_full(base_url, api_key, model, _AGENT_PROJECT_SYSTEM, user_prompt, max_tokens=12000)
     except http_requests.exceptions.RequestException as e:
         logger.error(f"agent_project LLM error: {e}")
         return jsonify({'error': str(e)}), 502
@@ -4701,7 +5470,7 @@ def agent_fix_project():
         "files 必须包含项目所有文件的完整内容（即使未改动），summary 用一句话说明修复点。"
     )
     try:
-        ai_text, finish_reason = _llm_chat_full(base_url, api_key, model, _AGENT_PROJECT_SYSTEM, user_prompt, max_tokens=12000)
+        ai_text, finish_reason = _llm_json_chat_full(base_url, api_key, model, _AGENT_PROJECT_SYSTEM, user_prompt, max_tokens=12000)
     except http_requests.exceptions.RequestException as e:
         logger.error(f"agent_fix_project LLM error: {e}")
         return jsonify({'error': str(e)}), 502
@@ -4743,7 +5512,7 @@ def agent_refine_project():
         "files 必须包含项目所有文件的完整内容，summary 用一句话说明本次改动。"
     )
     try:
-        ai_text, finish_reason = _llm_chat_full(base_url, api_key, model, _AGENT_PROJECT_SYSTEM, user_prompt, max_tokens=12000)
+        ai_text, finish_reason = _llm_json_chat_full(base_url, api_key, model, _AGENT_PROJECT_SYSTEM, user_prompt, max_tokens=12000)
     except http_requests.exceptions.RequestException as e:
         logger.error(f"agent_refine_project LLM error: {e}")
         return jsonify({'error': str(e)}), 502
@@ -4815,7 +5584,7 @@ def agent_refine_step():
         "请只输出该步骤新的 JSON：{\"title\":..., \"description\":..., \"reason\":...}。"
     )
     try:
-        ai_text = _llm_chat(base_url, api_key, model, _AGENT_REFINE_STEP_SYSTEM, user_prompt, max_tokens=600)
+        ai_text, _ = _llm_json_chat_full(base_url, api_key, model, _AGENT_REFINE_STEP_SYSTEM, user_prompt, max_tokens=600)
     except http_requests.exceptions.RequestException as e:
         logger.error(f"agent_refine_step LLM error: {e}")
         return jsonify({"error": str(e)}), 502
@@ -4864,7 +5633,7 @@ def agent_fix():
         "请根据错误修复脚本（保持任务目标），输出 JSON。"
     )
     try:
-        ai_text, finish_reason = _llm_chat_full(base_url, api_key, model, _AGENT_FIX_SYSTEM, user_prompt, max_tokens=8000)
+        ai_text, finish_reason = _llm_json_chat_full(base_url, api_key, model, _AGENT_FIX_SYSTEM, user_prompt, max_tokens=8000)
     except http_requests.exceptions.RequestException as e:
         logger.error(f"agent_fix LLM error: {e}")
         return jsonify({"error": str(e)}), 502
@@ -8231,6 +9000,7 @@ def alias_status_stream():
 if __name__ == '__main__':
     PORT = int(os.environ.get('PORT', 8765))
     HOST = os.environ.get('HOST', '0.0.0.0')
+    DEBUG = os.environ.get('FLASK_DEBUG', '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
     if not os.path.isdir(DIST_DIR):
         print(f"\n⚠️  WARNING: dist/ directory not found at {DIST_DIR}")
@@ -8282,11 +9052,12 @@ if __name__ == '__main__':
 ║    ✅ Code save, run & HTML preview                      ║
 ║    ✅ Built-in terminal + WebSocket PTY (flask-sock)     ║
 ║    ✅ Streaming responses with markdown                  ║
-║    ✅ Web search (duckduckgo-search)                     ║
+║    ✅ Web search (ddgs)                                  ║
 ║    ✅ TTS proxy & sudo-aware shell execution             ║
 ║    ✅ LLM-generated reusable plugins                     ║
 ║                                                          ║
 ╚══════════════════════════════════════════════════════════╝
     """)
 
-    app.run(host=HOST, port=PORT, debug=True, threaded=True)
+    logger.info('Starting server host=%s port=%s debug=%s', HOST, PORT, DEBUG)
+    app.run(host=HOST, port=PORT, debug=DEBUG, threaded=True, use_reloader=DEBUG)

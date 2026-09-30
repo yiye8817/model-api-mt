@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Bot, FolderOpen, Plug, RefreshCw, Terminal as TerminalIcon, Wand2 } from 'lucide-react';
 import DirPicker from './DirPicker';
 import { bindTermClipboard } from '../lib/termClipboard';
+import { registerTerminalLinkProvider, terminalLinkHandler } from '../lib/terminalLinks';
+import { getDesktop } from '../lib/desktopBridge';
 
 const AUTOPICK_KEY = 'hermesTerm/autoPick';
 const AUTOPICK_STRATEGY_KEY = 'hermesTerm/autoPickStrategy';
@@ -157,6 +159,9 @@ interface Props {
   active: boolean;
   defaultCwd: string;
   repoDir?: string;
+  /** Route a terminal path to a browser tab or the OS default app. */
+  onOpenPath?: (path: string, cwd?: string) => void;
+  onOpenUrl?: (url: string, title?: string) => void;
   provider?: HermesProvider | null;
   /** 标签页 id，用于上报工作目录等状态。 */
   tabId?: string;
@@ -169,7 +174,7 @@ interface Props {
 
 const WS_URL = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws-hermes-term';
 
-export default function HermesTerminal({ active, defaultCwd, repoDir, provider, tabId, onCwdChange, injected, onInjectedConsumed }: Props) {
+export default function HermesTerminal({ active, defaultCwd, repoDir, onOpenPath, onOpenUrl, provider, tabId, onCwdChange, injected, onInjectedConsumed }: Props) {
   const [cwd, setCwd] = useState(defaultCwd);
   const [cwdDraft, setCwdDraft] = useState(defaultCwd);
   const [connected, setConnected] = useState(false);
@@ -265,6 +270,7 @@ export default function HermesTerminal({ active, defaultCwd, repoDir, provider, 
     let ro: ResizeObserver | null = null;
 
     let unbindClipboard: (() => void) | null = null;
+    let linkDisposable: { dispose: () => void } | null = null;
     (async () => {
       await import('xterm/css/xterm.css');
       const [xtermMod, fitMod] = await Promise.all([import('xterm'), import('xterm-addon-fit')]);
@@ -272,6 +278,17 @@ export default function HermesTerminal({ active, defaultCwd, repoDir, provider, 
       const FitAddon = (fitMod as any).FitAddon ?? (fitMod as any).default;
       const el = containerRef.current;
       if (cancelled || !el) return;
+
+      const openTerminalTarget = (target: string) => {
+        const desktop = getDesktop();
+        if (/^https?:\/\//i.test(target)) {
+          if (onOpenUrl) onOpenUrl(target);
+          else if (desktop) void desktop.openExternal(target);
+          else window.open(target, '_blank', 'noopener,noreferrer');
+          return;
+        }
+        onOpenPath?.(target, cwdRef.current || defaultCwd);
+      };
 
       // 清理旧实例
       try { wsRef.current?.close(); } catch { /* noop */ }
@@ -285,6 +302,7 @@ export default function HermesTerminal({ active, defaultCwd, repoDir, provider, 
         scrollback: 8000,
         rightClickSelectsWord: false,
         theme: { background: '#1a1408', foreground: '#e2e8f0', cursor: '#f59e0b', selectionBackground: 'rgba(245,158,11,0.25)' },
+        linkHandler: terminalLinkHandler(openTerminalTarget),
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
@@ -292,6 +310,8 @@ export default function HermesTerminal({ active, defaultCwd, repoDir, provider, 
       try { fit.fit(); } catch { /* noop */ }
       termRef.current = term;
       fitRef.current = fit;
+
+      linkDisposable = registerTerminalLinkProvider(term, link => openTerminalTarget(link.text));
 
       const ws = new WebSocket(WS_URL);
       ws.binaryType = 'arraybuffer';
@@ -360,13 +380,14 @@ export default function HermesTerminal({ active, defaultCwd, repoDir, provider, 
       cancelled = true;
       ro?.disconnect();
       try { unbindClipboard?.(); } catch { /* noop */ }
+      try { linkDisposable?.dispose(); } catch { /* noop */ }
       if (pickTimerRef.current) { window.clearTimeout(pickTimerRef.current); pickTimerRef.current = null; }
       try { wsRef.current?.close(); } catch { /* noop */ }
       try { termRef.current?.dispose(); } catch { /* noop */ }
       termRef.current = null;
       wsRef.current = null;
     };
-  }, [reconnectNonce]);
+  }, [reconnectNonce, onOpenPath, onOpenUrl]);
 
   // 标签从隐藏切到可见时重新适配尺寸并聚焦
   useEffect(() => {

@@ -2,6 +2,7 @@
 node_modules/
 .venv/
 .venv-run/
+multillm-fusion/.venv/
 
 # Build artifacts and packaged releases
 dist/
@@ -28,7 +29,14 @@ plugins/
 logs/
 *.log
 *.pid
+*.sudo_pass
 .sudo_pass
+.multillm-fusion-data/
+.runtime/
+*/.runtime/
+*.sqlite
+*.sqlite3
+*.db
 
 # Local configuration and secrets
 .env
@@ -48,3 +56,6 @@ terminal.html
 terminal_server.py
 docs/
 deepseek-plugin-conversation-feature16/
+
+# One-off local task runners and generated delivery helpers
+desktop-agent/tools/

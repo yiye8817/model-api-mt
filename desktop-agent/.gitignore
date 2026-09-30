@@ -1,0 +1,10 @@
+.venv/
+.runtime/
+workspace/
+agent.config.json
+agent.config.json.lock
+*.egg-info/
+__pycache__/
+*.pyc
+*.log
+*.tar.gz

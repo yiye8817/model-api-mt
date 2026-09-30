@@ -1,0 +1,137 @@
+{
+  "chatgpt": {
+    "name": "ChatGPT",
+    "domains": [
+      "chatgpt.com",
+      "openai.com"
+    ],
+    "origins": [
+      "https://chatgpt.com"
+    ]
+  },
+  "deepseek": {
+    "name": "DeepSeek",
+    "domains": [
+      "deepseek.com"
+    ],
+    "origins": [
+      "https://chat.deepseek.com"
+    ]
+  },
+  "qwen": {
+    "name": "Qwen",
+    "domains": [
+      "qwen.ai",
+      "qwenlm.ai"
+    ],
+    "origins": [
+      "https://chat.qwen.ai",
+      "https://chat.qwenlm.ai"
+    ]
+  },
+  "claude": {
+    "name": "Claude",
+    "domains": [
+      "claude.ai"
+    ],
+    "origins": [
+      "https://claude.ai"
+    ]
+  },
+  "grok": {
+    "name": "Grok",
+    "domains": [
+      "grok.com"
+    ],
+    "origins": [
+      "https://grok.com"
+    ]
+  },
+  "glm": {
+    "name": "GLM（智谱清言）",
+    "domains": [
+      "chatglm.cn",
+      "z.ai"
+    ],
+    "origins": [
+      "https://chatglm.cn",
+      "https://www.chatglm.cn",
+      "https://z.ai",
+      "https://chat.z.ai"
+    ]
+  },
+  "kimi": {
+    "name": "Kimi",
+    "domains": [
+      "kimi.com"
+    ],
+    "origins": [
+      "https://kimi.com",
+      "https://www.kimi.com"
+    ]
+  },
+  "doubao": {
+    "name": "豆包",
+    "domains": [
+      "doubao.com"
+    ],
+    "origins": [
+      "https://www.doubao.com",
+      "https://doubao.com"
+    ]
+  },
+  "yuanbao": {
+    "name": "腾讯元宝",
+    "domains": [
+      "yuanbao.tencent.com",
+      "tencent.com"
+    ],
+    "origins": [
+      "https://yuanbao.tencent.com"
+    ]
+  },
+  "mimo": {
+    "name": "小米 MiMo",
+    "domains": [
+      "xiaomimimo.com",
+      "mi.com"
+    ],
+    "origins": [
+      "https://aistudio.xiaomimimo.com",
+      "https://mimo.mi.com",
+      "https://mimo.xiaomi.com",
+      "https://mimo-ai.xiaomimimo.com"
+    ]
+  },
+  "baidu": {
+    "name": "百度文心",
+    "domains": [
+      "baidu.com"
+    ],
+    "origins": [
+      "https://wenxin.baidu.com",
+      "https://yiyan.baidu.com",
+      "https://wantalk.baidu.com"
+    ]
+  },
+  "spark": {
+    "name": "讯飞星火",
+    "domains": [
+      "xfyun.cn"
+    ],
+    "origins": [
+      "https://spark.xfyun.cn"
+    ]
+  },
+  "stepfun": {
+    "name": "阶跃星辰",
+    "domains": [
+      "stepfun.com",
+      "stepchat.cn"
+    ],
+    "origins": [
+      "https://chat.stepfun.com",
+      "https://platform.stepfun.com"
+    ]
+  }
+}

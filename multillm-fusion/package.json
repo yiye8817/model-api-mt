@@ -1,0 +1,7 @@
+{
+  "name": "multillm-fusion-runtime",
+  "version": "1.17.10",
+  "private": true,
+  "main": "electron/main.cjs",
+  "description": "Vendored MultiLLM Fusion runtime launched by the host workbench"
+}

@@ -3,18 +3,19 @@ import {
   Send, Loader2, Bot, User, AlertCircle, Sparkles,
   Paperclip, Image, FileText, X, File as FileIcon, RotateCcw, Pencil,
   Copy, Download, FolderPlus, Volume2, StopCircle, Puzzle, Globe, ThumbsUp, Wand2, Server,
-  Settings as SettingsIcon, Link2, ChevronRight,
+  Settings as SettingsIcon, Link2, ChevronRight, ChevronDown, MessagesSquare,
   CheckCircle2, XCircle, Loader, AlertTriangle, Sparkle, FileCode2, PlayCircle, Hammer,
 } from 'lucide-react';
 import MarkdownRenderer from './MarkdownRenderer';
 import RichContentRenderer from './RichContentRenderer';
 import AgentDialog from './AgentDialog';
 import type { APIProvider, ChatMessage, Conversation, FileAttachment, PluginResult, PluginProgressEvent } from '../types';
+import { isDesktopApp, type WebChatTarget } from '../lib/desktopBridge';
 
 interface Props {
   conversation: Conversation | null;
   provider: APIProvider | null;
-  onSendMessage: (content: string, attachments?: FileAttachment[], options?: { webSearch?: boolean }) => void;
+  onSendMessage: (content: string, attachments?: FileAttachment[], options?: { webSearch?: boolean; webChatTargets?: string[] }) => void;
   isLoading: boolean;
   streamingContent: string;
   injectedInput?: string | null;
@@ -40,6 +41,12 @@ interface Props {
   /** auto-route 命中「代码编写」时，请求打开 AI 工作流（多文件工程、自动开跑）。 */
   agentRequest?: { goal: string; nonce: number } | null;
   onAgentRequestConsumed?: () => void;
+  /** Electron 中已打开且可识别的 AI 网页标签。 */
+  webChatTargets?: WebChatTarget[];
+  webChatAggregator?: { providerName: string; model: string; usesBasicModel: boolean } | null;
+  onWebChatSelectionChange?: (enabled: boolean, ids: string[]) => void;
+  onOpenWebChatSite?: (url: string, title?: string) => void;
+  onOpenUrl?: (url: string, title?: string) => void;
 }
 
 function formatFileSize(bytes: number): string {
@@ -48,7 +55,7 @@ function formatFileSize(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-export default function ChatArea({ conversation, provider, onSendMessage, isLoading, streamingContent, injectedInput, injectedAttachments, onInjectedInputConsumed, onResend, onEditUserMessage, onLikeMessage, pluginEnabled, onPluginEnabledChange, onPluginRun, onPluginChat, onPluginReloadCode, onOpenSettings, isBusy, onStop, autoRouteEnabled, onAutoRouteEnabledChange, agentRequest, onAgentRequestConsumed }: Props) {
+export default function ChatArea({ conversation, provider, onSendMessage, isLoading, streamingContent, injectedInput, injectedAttachments, onInjectedInputConsumed, onResend, onEditUserMessage, onLikeMessage, pluginEnabled, onPluginEnabledChange, onPluginRun, onPluginChat, onPluginReloadCode, onOpenSettings, isBusy, onStop, autoRouteEnabled, onAutoRouteEnabledChange, agentRequest, onAgentRequestConsumed, webChatTargets = [], webChatAggregator, onWebChatSelectionChange, onOpenWebChatSite, onOpenUrl }: Props) {
   const busy = !!(isBusy ?? isLoading);
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
@@ -63,6 +70,31 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
   const [agentInitialGoal, setAgentInitialGoal] = useState('');
   const [agentMode, setAgentMode] = useState<'script' | 'project'>('script');
   const [agentAutoStart, setAgentAutoStart] = useState(false);
+  const [webChatEnabled, setWebChatEnabled] = useState(false);
+  const [showWebChatMenu, setShowWebChatMenu] = useState(false);
+  const [selectedWebChatIds, setSelectedWebChatIds] = useState<string[]>([]);
+  const knownWebChatIdsRef = useRef<Set<string>>(new Set());
+  const desktopWebChatAvailable = isDesktopApp();
+  const webChatTargetSignature = webChatTargets.map(target => `${target.id}:${target.url}`).join('|');
+
+  // 新打开的 AI 网页默认选中；关闭标签后自动清理，用户手动取消的标签不会被反复选回。
+  useEffect(() => {
+    const currentIds = new Set(webChatTargets.map(target => target.id));
+    const newlyOpened = webChatTargets
+      .map(target => target.id)
+      .filter(id => !knownWebChatIdsRef.current.has(id));
+    setSelectedWebChatIds(previous => {
+      const kept = previous.filter(id => currentIds.has(id));
+      return [...new Set([...kept, ...newlyOpened])].slice(0, Math.max(2, kept.length));
+    });
+    knownWebChatIdsRef.current = currentIds;
+    if (currentIds.size === 0) setWebChatEnabled(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [webChatTargetSignature]);
+
+  useEffect(() => {
+    onWebChatSelectionChange?.(webChatEnabled, selectedWebChatIds);
+  }, [webChatEnabled, selectedWebChatIds, onWebChatSelectionChange]);
 
   // App 请求打开 AI 工作流（代码编写自动流程）
   useEffect(() => {
@@ -145,11 +177,20 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
 
   const handleSend = () => {
     if ((!input.trim() && attachments.length === 0) || busy) return;
+    if (webChatEnabled && selectedWebChatIds.length === 0) {
+      setShowWebChatMenu(true);
+      return;
+    }
+    const sendOptions = {
+      ...(useWebSearch ? { webSearch: true } : {}),
+      ...(webChatEnabled ? { webChatTargets: selectedWebChatIds } : {}),
+    };
     onSendMessage(
       input.trim(),
       attachments.length > 0 ? attachments : undefined,
-      useWebSearch ? { webSearch: true } : undefined,
+      Object.keys(sendOptions).length ? sendOptions : undefined,
     );
+    setShowWebChatMenu(false);
     setInput('');
     setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
@@ -255,7 +296,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
   const messages = conversation.messages;
 
   return (
-    <div className="flex-1 flex flex-col bg-gray-850 min-w-0">
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-gray-850 min-w-0">
       {/* Chat Header */}
       <div className="border-b border-gray-700 px-6 py-3 bg-gray-900/50 shrink-0">
         <div className="flex items-center justify-between gap-2">
@@ -295,7 +336,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
         <div className="max-w-4xl mx-auto">
           {messages.length === 0 && (
             <div className="flex items-center justify-center h-full py-20 text-gray-500">
@@ -327,6 +368,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
                 onQuoteToInputAndSend={handleQuoteToInputAndSend}
                 busy={busy}
                 onStop={onStop}
+                onOpenUrl={onOpenUrl}
               />
             );
           })}
@@ -341,6 +383,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
                   content={streamingContent}
                   onQuoteToInput={handleQuoteToInput}
                   onQuoteToInputAndSend={handleQuoteToInputAndSend}
+                  onOpenUrl={onOpenUrl}
                 />
                 <span className="inline-block w-2 h-5 bg-blue-400 animate-pulse ml-0.5 align-middle" />
               </div>
@@ -352,7 +395,8 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
             // 时间线本身已经是“正在进行”的可视化，无需再叠一条 "Thinking..."。
             const last = conversation?.messages[conversation.messages.length - 1];
             const inFlightPlugin = !!(last && last.role === 'assistant' && last.pluginProgress && !last.pluginResult);
-            if (!isLoading || streamingContent || inFlightPlugin) return null;
+            const inFlightWebChat = !!(last?.webChat && ['running', 'synthesizing'].includes(last.webChat.status));
+            if (!isLoading || streamingContent || inFlightPlugin || inFlightWebChat) return null;
             return (
               <div className="px-6 py-5 flex gap-4">
                 <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shrink-0">
@@ -412,7 +456,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
           )}
 
           <div className="flex gap-2 items-end">
-            <div className="flex gap-1 shrink-0">
+            <div className="relative flex gap-1 shrink-0">
               {onAutoRouteEnabledChange != null && (
                 <button
                   type="button"
@@ -478,6 +522,93 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
                 <Globe size={20} />
               </button>
               <button
+                type="button"
+                onClick={() => setShowWebChatMenu(open => !open)}
+                disabled={!provider || busy || !desktopWebChatAvailable}
+                title={desktopWebChatAvailable
+                  ? (webChatEnabled ? `网页群聊已开启（${selectedWebChatIds.length} 个网页）` : '配置网页 AI 群聊')
+                  : '网页 AI 群聊仅在 Electron 桌面版可用'}
+                className={`p-2.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  webChatEnabled ? 'text-fuchsia-300 bg-fuchsia-500/20' : 'text-gray-400 hover:text-fuchsia-300 hover:bg-gray-800'
+                }`}
+              >
+                <MessagesSquare size={20} />
+              </button>
+              {showWebChatMenu && (
+                <div className="absolute z-40 bottom-full left-0 mb-2 w-80 rounded-xl border border-fuchsia-500/30 bg-gray-900 p-3 shadow-2xl">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div>
+                      <div className="text-xs font-medium text-white">网页 AI 群聊</div>
+                      <div className="text-[10px] text-gray-500 mt-0.5">
+                        默认选择 2 个网页，由基本对话模型综合
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-1.5 text-[11px] text-fuchsia-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={webChatEnabled}
+                        onChange={event => setWebChatEnabled(event.target.checked)}
+                        className="accent-fuchsia-500"
+                      />
+                      启用
+                    </label>
+                  </div>
+                  <div className="mb-2 rounded border border-fuchsia-500/20 bg-fuchsia-950/20 px-2.5 py-2 text-[10px] text-gray-400">
+                    综合模型：
+                    <span className="ml-1 text-fuchsia-300">
+                      {webChatAggregator
+                        ? `${webChatAggregator.providerName} / ${webChatAggregator.model}`
+                        : (provider?.selectedModel || '未选择')}
+                    </span>
+                    <span className="ml-1 text-gray-600">
+                      （{webChatAggregator?.usesBasicModel ? '基本对话模型' : '当前选择模型'}）
+                    </span>
+                  </div>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {webChatTargets.length === 0 ? (
+                      <div className="rounded border border-gray-700 bg-gray-800/60 px-2.5 py-2 text-[11px] text-gray-400">
+                        尚未打开 AI 聊天网页。请先打开并登录，然后返回“对话”标签。
+                      </div>
+                    ) : webChatTargets.map(target => (
+                      <label key={target.id} className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-gray-800 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedWebChatIds.includes(target.id)}
+                          onChange={event => setSelectedWebChatIds(previous => event.target.checked
+                            ? [...new Set([...previous, target.id])]
+                            : previous.filter(id => id !== target.id))}
+                          className="accent-fuchsia-500"
+                        />
+                        <span className="text-xs text-gray-200 capitalize">{target.site}</span>
+                        <span className="min-w-0 flex-1 truncate text-[10px] text-gray-500" title={target.url}>{target.title}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="my-2 border-t border-gray-700" />
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[
+                      ['DeepSeek', 'https://chat.deepseek.com/'],
+                      ['Qwen', 'https://chat.qwen.ai/'],
+                      ['ChatGPT', 'https://chatgpt.com/'],
+                      ['Grok', 'https://grok.com/'],
+                      ['Claude', 'https://claude.ai/new'],
+                      ['Gemini', 'https://gemini.google.com/app'],
+                      ['Poe', 'https://poe.com/'],
+                    ].map(([name, url]) => (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => onOpenWebChatSite?.(url, name)}
+                        className="rounded bg-gray-800 px-2 py-1.5 text-[11px] text-gray-300 hover:bg-gray-700 hover:text-white"
+                      >
+                        {name}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-2 text-[10px] text-gray-600">需要网页保持登录；网页改版时可能需要刷新后重试。</div>
+                </div>
+              )}
+              <button
                 onClick={() => {
                   setAgentInitialGoal(input.trim());
                   setAgentMode('script');
@@ -523,8 +654,15 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
               </button>
             )}
           </div>
-          <div className="text-xs text-gray-600 mt-1.5 px-1">
-            Drag & drop or paste images • Attach files to include in context
+          <div className="text-xs text-gray-600 mt-1.5 px-1 flex items-center gap-2 flex-wrap">
+            <span>Drag & drop or paste images • Attach files to include in context</span>
+            {webChatEnabled && (
+              <span className="text-fuchsia-400">
+                网页群聊：{selectedWebChatIds.length} 个网页 → {webChatAggregator
+                  ? `${webChatAggregator.providerName} / ${webChatAggregator.model}`
+                  : (provider?.selectedModel || '当前模型')} 综合
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -1039,6 +1177,183 @@ function PluginResultDisplay({
   );
 }
 
+function WebChatAnswersPanel({
+  state,
+  onOpenUrl,
+}: {
+  state: NonNullable<ChatMessage['webChat']>;
+  onOpenUrl?: (url: string, title?: string) => void;
+}) {
+  const [collapsed, setCollapsed] = useState(true);
+  const [hovered, setHovered] = useState<{
+    title: string;
+    model?: string;
+    content: string;
+    left: number;
+    top: number;
+  } | null>(null);
+
+  const latestProgressEvent = state.answers
+    .flatMap(answer => answer.events || [])
+    .sort((a, b) => b.timestamp - a.timestamp)[0];
+
+  const showPreview = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    answer: NonNullable<ChatMessage['webChat']>['answers'][number],
+  ) => {
+    if (!answer.content) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = Math.min(520, window.innerWidth - 32);
+    setHovered({
+      title: answer.title,
+      model: answer.model,
+      content: answer.content,
+      left: Math.max(16, Math.min(rect.left, window.innerWidth - width - 16)),
+      top: Math.max(16, Math.min(rect.bottom + 8, window.innerHeight - 360)),
+    });
+  };
+
+  return (
+    <div className="mt-4 rounded-xl border border-fuchsia-500/25 bg-gray-900/65 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setCollapsed(value => !value)}
+        className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-gray-800/60 ${collapsed ? '' : 'border-b border-gray-700/70'}`}
+        title={collapsed ? '展开网页 AI 原始回答' : '折叠网页 AI 原始回答'}
+      >
+        <div className="flex items-center gap-2 text-xs font-medium text-fuchsia-200">
+          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+          <MessagesSquare size={14} />
+          网页 AI 原始回答
+          <span className="text-[10px] font-normal text-gray-500">（{state.answers.length}）</span>
+          {latestProgressEvent && (
+            <span className="max-w-64 truncate text-[10px] font-normal text-emerald-300">
+              · {latestProgressEvent.message}
+            </span>
+          )}
+        </div>
+        <div className="text-[10px] text-gray-400">
+          综合：<span className="text-fuchsia-300">{state.aggregator.providerName} / {state.aggregator.model}</span>
+          <span className="ml-1 text-gray-600">（{state.aggregator.usesBasicModel ? '基本对话模型' : '当前选择模型'}）</span>
+        </div>
+      </button>
+      {!collapsed && <div className="divide-y divide-gray-800">
+        {state.answers.map(answer => (
+          <div key={answer.tabId} className="px-3 py-3">
+            <div className="flex items-center gap-2">
+              {answer.status === 'waiting' ? (
+                <Loader size={13} className="shrink-0 animate-spin text-blue-400" />
+              ) : answer.status === 'done' ? (
+                <CheckCircle2 size={13} className="shrink-0 text-emerald-400" />
+              ) : (
+                <XCircle size={13} className="shrink-0 text-red-400" />
+              )}
+              <span className="text-xs font-medium text-gray-100">{answer.title}</span>
+              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
+                {answer.model || answer.site}
+              </span>
+              <button
+                type="button"
+                onClick={() => onOpenUrl?.(answer.url, answer.title)}
+                onMouseEnter={event => showPreview(event, answer)}
+                onMouseLeave={() => setHovered(null)}
+                className="ml-auto inline-flex min-w-0 items-center gap-1 text-[11px] text-blue-400 hover:text-blue-300 hover:underline"
+                title="在应用网页标签中打开；悬停预览回答"
+              >
+                <Link2 size={11} />
+                <span className="max-w-48 truncate">{answer.url}</span>
+              </button>
+            </div>
+            {answer.partial && (
+              <div className="mt-2 text-[11px] text-amber-300">等待生成结束超时，显示当前已获取的内容。</div>
+            )}
+            {!!answer.events?.length && (
+              <div className="mt-2 rounded border border-blue-700/30 bg-blue-950/15 px-2 py-1.5">
+                <div className="mb-1 text-[10px] font-medium text-blue-300">关键流程</div>
+                <div className="space-y-0.5">
+                  {answer.events.slice(-10).map((event, index) => (
+                    <div
+                      key={`${event.timestamp}-${event.event}-${index}`}
+                      className="flex items-start gap-1.5 text-[10px] text-gray-400"
+                    >
+                      <span className="shrink-0 font-mono text-gray-600">
+                        {new Date(event.timestamp).toLocaleTimeString()}
+                      </span>
+                      <span className={
+                        event.event.includes('failed') || event.event.includes('error')
+                          ? 'text-red-300'
+                          : event.event === 'page-saved' || event.event === 'markdown-copied'
+                            ? 'text-emerald-300'
+                            : ''
+                      }>
+                        {event.message}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {answer.validation && (
+              <div className={`mt-2 rounded border px-2 py-1.5 text-[10px] ${
+                answer.validation.complete
+                  ? 'border-emerald-700/40 bg-emerald-950/20 text-emerald-300'
+                  : 'border-amber-700/40 bg-amber-950/20 text-amber-300'
+              }`}>
+                <div>
+                  dump 校验：{answer.validation.complete ? '内容完整' : '可能不完整'}
+                  · 已提取 {answer.validation.selectedChars} 字符
+                  · dump 最长候选 {answer.validation.dumpMaxCandidateChars} 字符
+                </div>
+                <div className="mt-0.5 text-gray-500">{answer.validation.reason}</div>
+                {answer.extraction?.ok ? (
+                  <div className="mt-0.5 text-emerald-300">
+                    Markdown 来源：页面复制按钮 · {answer.extraction.copiedChars} 字符
+                  </div>
+                ) : answer.extraction ? (
+                  <div className="mt-0.5 text-amber-300">
+                    复制按钮失败，已回退 DOM：{answer.extraction.error || '未获取到剪贴板内容'}
+                  </div>
+                ) : null}
+                {answer.dumpPath && (
+                  <div className="mt-0.5 break-all font-mono text-gray-600">校验 dump：{answer.dumpPath}</div>
+                )}
+                {answer.pagePath && (
+                  <div className="mt-0.5 break-all font-mono text-gray-500">完整网页：{answer.pagePath}</div>
+                )}
+                {answer.pageSaveError && (
+                  <div className="mt-0.5 break-all text-red-300">完整网页保存失败：{answer.pageSaveError}</div>
+                )}
+              </div>
+            )}
+            {answer.error ? (
+              <div className="mt-2 whitespace-pre-wrap text-xs text-red-300">{answer.error}</div>
+            ) : answer.content ? (
+              <div className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap rounded-lg bg-gray-950/60 p-3 text-xs leading-relaxed text-gray-300">
+                {answer.content}
+              </div>
+            ) : (
+              <div className="mt-2 text-xs text-gray-500">正在等待网页回答…</div>
+            )}
+          </div>
+        ))}
+      </div>}
+      {!collapsed && hovered && (
+        <div
+          className="pointer-events-none fixed z-[80] w-[min(32rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-fuchsia-400/40 bg-gray-950 shadow-2xl"
+          style={{ left: hovered.left, top: hovered.top }}
+        >
+          <div className="border-b border-gray-700 px-3 py-2 text-xs font-medium text-white">
+            {hovered.title}{hovered.model ? ` · ${hovered.model}` : ''}
+          </div>
+          <div className="max-h-72 overflow-y-auto whitespace-pre-wrap px-3 py-3 text-xs leading-relaxed text-gray-200">
+            {hovered.content}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessageBubble({
   message,
   conversationId,
@@ -1058,6 +1373,7 @@ function MessageBubble({
   onQuoteToInputAndSend,
   busy,
   onStop,
+  onOpenUrl,
 }: {
   message: ChatMessage;
   conversationId: string;
@@ -1077,6 +1393,7 @@ function MessageBubble({
   onQuoteToInputAndSend?: (text: string) => void;
   busy?: boolean;
   onStop?: () => void;
+  onOpenUrl?: (url: string, title?: string) => void;
 }) {
   const isUser = message.role === 'user';
 
@@ -1121,8 +1438,12 @@ function MessageBubble({
                 content={message.content}
                 onQuoteToInput={onQuoteToInput}
                 onQuoteToInputAndSend={onQuoteToInputAndSend}
+                onOpenUrl={onOpenUrl}
               />
             </div>
+            {message.webChat && (
+              <WebChatAnswersPanel state={message.webChat} onOpenUrl={onOpenUrl} />
+            )}
             {message.sources && message.sources.length > 0 && (
               <SourcesList sources={message.sources} />
             )}

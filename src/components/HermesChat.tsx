@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Send, Loader2, RefreshCw, FolderOpen, Plug, Zap, Bot,
+  Search, Terminal, FileText, Wrench, CheckCircle2, CircleAlert, ExternalLink,
 } from 'lucide-react';
 import MarkdownRenderer from './MarkdownRenderer';
 import DirPicker from './DirPicker';
@@ -17,7 +18,18 @@ interface HermesProvider {
 type ChatItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'assistant'; id: string; text: string }
-  | { kind: 'system'; id: string; text: string };
+  | { kind: 'system'; id: string; text: string }
+  | {
+      kind: 'progress';
+      id: string;
+      phase: 'search' | 'command' | 'file' | 'tool';
+      status: 'started' | 'completed' | 'error';
+      title: string;
+      tool: string;
+      detail: string;
+      urls: string[];
+      duration?: number;
+    };
 
 interface Props {
   active: boolean;
@@ -32,6 +44,7 @@ interface Props {
   autoRules?: AutoInputRule[];
   autoRulesEnabled?: boolean;
   onRuleConsumed?: (ruleId: string) => void;
+  onOpenUrl?: (url: string, title?: string) => void;
 }
 
 const WS_URL = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws-hermes';
@@ -39,10 +52,21 @@ const WS_URL = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' +
 let _idSeq = 0;
 const nextId = () => `h${Date.now()}_${_idSeq++}`;
 
+const urlTitle = (url: string) => {
+  try { return new URL(url).hostname || url; } catch { return url; }
+};
+
+const progressIcon = (phase: 'search' | 'command' | 'file' | 'tool', size = 14) => {
+  if (phase === 'search') return <Search size={size} />;
+  if (phase === 'command') return <Terminal size={size} />;
+  if (phase === 'file') return <FileText size={size} />;
+  return <Wrench size={size} />;
+};
+
 export default function HermesChat({
   active, defaultCwd, repoDir, provider,
   tabId, onCwdChange, onSessionInfo, injected, onInjectedConsumed,
-  autoRules, autoRulesEnabled, onRuleConsumed,
+  onOpenUrl,
 }: Props) {
   const [cwd, setCwd] = useState(defaultCwd);
   const [cwdDraft, setCwdDraft] = useState(defaultCwd);
@@ -94,6 +118,18 @@ export default function HermesChat({
           if (restart) {
             pushItem({ kind: 'system', id: nextId(), text: `已重连 · ${obj.model || 'model'} · ${target}` });
           }
+        } else if (obj.type === 'progress') {
+          pushItem({
+            kind: 'progress',
+            id: nextId(),
+            phase: ['search', 'command', 'file'].includes(obj.phase) ? obj.phase : 'tool',
+            status: obj.status === 'error' ? 'error' : (obj.status === 'completed' ? 'completed' : 'started'),
+            title: obj.title || '执行步骤',
+            tool: obj.tool || '',
+            detail: obj.detail || '',
+            urls: Array.isArray(obj.urls) ? obj.urls.filter((url: unknown) => typeof url === 'string') : [],
+            duration: typeof obj.duration === 'number' ? obj.duration : undefined,
+          });
         } else if (obj.type === 'response') {
           pushItem({ kind: 'assistant', id: nextId(), text: obj.text || '' });
         } else if (obj.type === 'stderr') {
@@ -169,6 +205,15 @@ export default function HermesChat({
 
   useEffect(() => () => { try { wsRef.current?.close(); } catch { /* noop */ } }, []);
 
+  const openUrl = useCallback((url: string) => {
+    if (!/^https?:\/\//i.test(url)) return;
+    if (onOpenUrl) {
+      onOpenUrl(url, urlTitle(url));
+      return;
+    }
+    try { window.open(url, '_blank', 'noopener,noreferrer'); } catch { /* noop */ }
+  }, [onOpenUrl]);
+
   if (!launched) {
     return (
       <div className="flex flex-col h-full items-center justify-center bg-gray-900 text-gray-100 p-8">
@@ -212,7 +257,7 @@ export default function HermesChat({
   }
 
   return (
-    <div className="flex flex-col h-full bg-gray-900 text-gray-100">
+    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-gray-900 text-gray-100">
       <div className="shrink-0 border-b border-gray-700 px-3 py-2 flex items-center gap-2 text-xs flex-wrap">
         <Bot size={14} className="text-amber-400 shrink-0" />
         <FolderOpen size={14} className="text-amber-400 shrink-0" />
@@ -242,15 +287,59 @@ export default function HermesChat({
         <span className="text-gray-500">工作目录：</span>
         <span className="font-mono text-gray-300 truncate" title={cwd}>{cwd}</span>
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-4">
         {items.map((it) => (
           <div key={it.id} className={it.kind === 'user' ? 'text-right' : ''}>
             {it.kind === 'user' && <div className="inline-block text-left bg-amber-900/30 border border-amber-700/40 rounded-lg px-3 py-2 text-sm max-w-[85%]">{it.text}</div>}
-            {it.kind === 'assistant' && <div className="prose prose-invert prose-sm max-w-none"><MarkdownRenderer content={it.text} /></div>}
+            {it.kind === 'assistant' && (
+              <div className="min-w-0 overflow-hidden prose prose-invert prose-sm max-w-none">
+                <MarkdownRenderer content={it.text} onOpenUrl={openUrl} />
+              </div>
+            )}
             {it.kind === 'system' && <div className="text-xs text-gray-500 font-mono whitespace-pre-wrap">{it.text}</div>}
+            {it.kind === 'progress' && (
+              <div className={'max-w-[92%] rounded-lg border px-3 py-2 text-xs ' + (
+                it.status === 'error'
+                  ? 'border-red-800/60 bg-red-950/20'
+                  : it.status === 'completed'
+                    ? 'border-emerald-800/50 bg-emerald-950/15'
+                    : 'border-amber-800/50 bg-amber-950/15'
+              )}>
+                <div className="flex items-center gap-2">
+                  <span className={it.status === 'error' ? 'text-red-400' : it.status === 'completed' ? 'text-emerald-400' : 'text-amber-400'}>
+                    {it.status === 'completed' ? <CheckCircle2 size={14} /> : it.status === 'error' ? <CircleAlert size={14} /> : progressIcon(it.phase)}
+                  </span>
+                  <span className="font-medium text-gray-200">{it.title}</span>
+                  {it.tool && <code className="text-[10px] text-gray-500">{it.tool}</code>}
+                  {it.duration !== undefined && it.duration > 0 && <span className="ml-auto text-[10px] text-gray-600">{it.duration.toFixed(1)}s</span>}
+                </div>
+                {it.detail && (
+                  <div className="mt-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-gray-400">
+                    {it.detail}
+                  </div>
+                )}
+                {it.urls.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {it.urls.map((url) => (
+                      <button
+                        key={url}
+                        type="button"
+                        onClick={() => openUrl(url)}
+                        title={url}
+                        className="flex max-w-full items-center gap-1 rounded border border-blue-800/60 bg-blue-950/30 px-2 py-1 text-blue-300 hover:bg-blue-900/40"
+                      >
+                        <ExternalLink size={11} className="shrink-0" />
+                        <span className="truncate">{urlTitle(url)}</span>
+                        <span className="shrink-0 text-[10px] text-blue-500">新标签打开</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ))}
-        {running && <div className="flex items-center gap-2 text-amber-300 text-sm"><Loader2 size={14} className="animate-spin" /> Hermes 思考中…</div>}
+        {running && <div className="flex items-center gap-2 text-amber-300 text-sm"><Loader2 size={14} className="animate-spin" /> Hermes 正在处理…</div>}
       </div>
       <div className="shrink-0 border-t border-gray-700 p-2 flex gap-2">
         <textarea

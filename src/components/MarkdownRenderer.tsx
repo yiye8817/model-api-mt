@@ -1,10 +1,12 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { Children, cloneElement, isValidElement, useState, useCallback, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Copy, Check, Download, Play, Eye, Loader2, Lock, MessageSquare, Sparkles } from 'lucide-react';
+import { registerTerminalLinkProvider, terminalLinkHandler } from '../lib/terminalLinks';
+import { getDesktop } from '../lib/desktopBridge';
 
 /**
  * 把大模型输出里的 LaTeX 定界符规整为 remark-math 能识别的 `$`/`$$`。
@@ -37,8 +39,34 @@ interface RunResult {
   errorReason?: string;
 }
 
-const SHELL_LANGS = ['bash', 'sh', 'shell'];
-const RUNNABLE_LANGS = ['python', 'py', 'javascript', 'js', 'bash', 'sh', 'shell'];
+const RUNNABLE_LANG_ALIASES: Record<string, string> = {
+  python: 'python', py: 'python', python3: 'python',
+  javascript: 'javascript', js: 'javascript', node: 'javascript',
+  bash: 'bash', sh: 'bash', shell: 'bash', zsh: 'bash',
+};
+const RUNNABLE_LANGS = Object.values(RUNNABLE_LANG_ALIASES);
+
+function normalizeCodeLanguage(value: string): string {
+  const normalized = String(value || '').trim().toLowerCase().replace(/^language-/, '');
+  return RUNNABLE_LANG_ALIASES[normalized] || normalized;
+}
+
+function inferCodeLanguage(source: string): string {
+  const code = String(source || '').trim();
+  if (!code) return '';
+  // Qwen sometimes emits a fenced block without a language token. Keep the
+  // Python run action available when the source is recognisably Python.
+  if (
+    /^#!.*\bpython(?:3)?\b/m.test(code)
+    || /^(?:from\s+[A-Za-z_][\w.]*\s+import|import\s+[A-Za-z_][\w.]*)/m.test(code)
+    || /\bdef\s+[A-Za-z_]\w*\s*\([^)]*\)\s*:/m.test(code)
+    || /\bif\s+__name__\s*==\s*['"]__main__['"]\s*:/m.test(code)
+    || /\b(?:print|len|range|enumerate|asyncio\.run)\s*\(/.test(code) && /\b(?:for|while|try|except|with)\b/.test(code)
+  ) return 'python';
+  if (/^#!.*\b(?:ba)?sh\b/m.test(code) || /\b(?:echo|printf)\s+.+\n/.test(code) && /\$[A-Za-z_{]/.test(code)) return 'bash';
+  if (/\b(?:console\.log|const|let|var)\s+/.test(code)) return 'javascript';
+  return '';
+}
 
 const SUDO_PASSWORD_CACHE_KEY = 'model-api-tool/sudo_password';
 
@@ -57,7 +85,7 @@ function setSudoPasswordToCache(password: string): void {
   } catch {}
 }
 
-function CodeBlock({ className, children, onQuoteToInput, onQuoteToInputAndSend, ...props }: any) {
+function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuoteToInputAndSend, onOpenUrl, ...props }: any) {
   const [copied, setCopied] = useState(false);
   const [runResult, setRunResult] = useState<RunResult>({ status: 'idle', output: '' });
   const [showPreview, setShowPreview] = useState(false);
@@ -92,9 +120,10 @@ function CodeBlock({ className, children, onQuoteToInput, onQuoteToInputAndSend,
   /** 创建终端前需先输入 sudo 密码（未命中缓存时） */
   const [showSudoDialogForTerminal, setShowSudoDialogForTerminal] = useState(false);
 
-  const match = /language-(\w+)/.exec(className || '');
-  const lang = match ? match[1] : '';
   const code = String(children).replace(/\n$/, '');
+  const rawLang = /language-([\w.+-]+)/i.exec(className || '')?.[1] || '';
+  const isInline = inline === true || (!__block && !className && !code.includes('\n'));
+  const lang = normalizeCodeLanguage(rawLang) || (!isInline ? inferCodeLanguage(code) : '');
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code);
@@ -219,6 +248,7 @@ function CodeBlock({ className, children, onQuoteToInput, onQuoteToInputAndSend,
     let term: any = null;
     let fitAddon: any = null;
     let ws: WebSocket | null = null;
+    let linkDisposable: { dispose: () => void } | null = null;
     let ro: ResizeObserver | null = null;
     let cancelled = false;
     let autoAnswerTimer: ReturnType<typeof setTimeout> | null = null;
@@ -228,6 +258,16 @@ function CodeBlock({ className, children, onQuoteToInput, onQuoteToInputAndSend,
       const Terminal = xtermMod.Terminal;
       const FitAddon = (fitMod as any).FitAddon ?? (fitMod as any).default;
       if (cancelled || !el) return;
+      const openTerminalTarget = (target: string) => {
+        const desktop = getDesktop();
+        if (/^https?:\/\//i.test(target)) {
+          if (onOpenUrl) onOpenUrl(target);
+          else if (desktop) void desktop.openExternal(target);
+          else window.open(target, '_blank', 'noopener,noreferrer');
+        } else if (desktop) {
+          void desktop.openTarget({ target });
+        }
+      };
       term = new Terminal({
         fontFamily: 'ui-monospace, "Cascadia Code", "JetBrains Mono", monospace',
         fontSize: 12,
@@ -235,11 +275,13 @@ function CodeBlock({ className, children, onQuoteToInput, onQuoteToInputAndSend,
         cursorBlink: true,
         scrollback: 5000,
         theme: { background: '#0f172a', foreground: '#e2e8f0', cursor: '#4ade80', selectionBackground: 'rgba(74,222,128,0.2)' },
+        linkHandler: terminalLinkHandler(openTerminalTarget),
       });
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(el);
       fitAddon.fit();
+      linkDisposable = registerTerminalLinkProvider(term, link => openTerminalTarget(link.text));
       // 专用干净执行通道：后端起 bash --norc 跑「检测依赖→装依赖→执行→交互」包装流程，
       // 退出码经文本 JSON 帧回传，PTY 字节直接写入终端（无哨兵、无逐行注入）。
       const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws-run';
@@ -365,6 +407,7 @@ function CodeBlock({ className, children, onQuoteToInput, onQuoteToInputAndSend,
       cancelled = true;
       if (autoAnswerTimer != null) { clearTimeout(autoAnswerTimer); autoAnswerTimer = null; }
       ro?.disconnect();
+      try { linkDisposable?.dispose(); } catch {}
       if (wsTerminalRef.current) {
         try { wsTerminalRef.current.ws?.close(); } catch {}
         try { wsTerminalRef.current.term?.dispose(); } catch {}
@@ -445,10 +488,10 @@ function CodeBlock({ className, children, onQuoteToInput, onQuoteToInputAndSend,
   }, [lang, code, doRun, startWsRun]);
 
   const isHtml = lang === 'html' || (!lang && code.trim().startsWith('<'));
-  const isRunnable = ['python', 'py', 'javascript', 'js', 'bash', 'sh', 'shell'].includes(lang);
+  const isRunnable = RUNNABLE_LANGS.includes(lang);
 
   // Inline code
-  if (!className) {
+  if (isInline) {
     return (
       <code className="bg-gray-700/60 text-pink-300 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
         {children}
@@ -917,9 +960,11 @@ interface Props {
   onQuoteToInput?: (text: string) => void;
   /** 引用到输入并立即发送（用于 WebSocket 终端等） */
   onQuoteToInputAndSend?: (text: string) => void;
+  /** 在宿主应用内打开 HTTP(S) 链接，例如创建网页标签页。 */
+  onOpenUrl?: (url: string, title?: string) => void;
 }
 
-export default function MarkdownRenderer({ content, onQuoteToInput, onQuoteToInputAndSend }: Props) {
+export default function MarkdownRenderer({ content, onQuoteToInput, onQuoteToInputAndSend, onOpenUrl }: Props) {
   return (
     <div className="prose prose-invert max-w-none
       [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mb-4 [&_h1]:mt-6 [&_h1]:text-white
@@ -943,8 +988,15 @@ export default function MarkdownRenderer({ content, onQuoteToInput, onQuoteToInp
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: '#f87171', strict: false }]]}
         components={{
-          code: (codeProps) => <CodeBlock {...codeProps} onQuoteToInput={onQuoteToInput} onQuoteToInputAndSend={onQuoteToInputAndSend} />,
-          pre: ({ children }) => <>{children}</>,
+          code: (codeProps) => <CodeBlock {...codeProps} onQuoteToInput={onQuoteToInput} onQuoteToInputAndSend={onQuoteToInputAndSend} onOpenUrl={onOpenUrl} />,
+          // ReactMarkdown v10 no longer passes the old `inline` prop for every
+          // code node. Mark children of <pre> explicitly so an unlabeled
+          // fenced Python block is still rendered as a runnable block.
+          pre: ({ children }) => (
+            <>{Children.map(children, child => (
+              isValidElement(child) ? cloneElement(child as any, { __block: true }) : child
+            ))}</>
+          ),
           a: ({ href, children, ...rest }) => {
             const safeHref = (() => {
               if (!href) return undefined;
@@ -963,6 +1015,10 @@ export default function MarkdownRenderer({ content, onQuoteToInput, onQuoteToInp
                 onClick={e => {
                   if (!safeHref || safeHref.startsWith('#')) return;
                   e.preventDefault();
+                  if (onOpenUrl && /^https?:/i.test(safeHref)) {
+                    onOpenUrl(safeHref);
+                    return;
+                  }
                   try { window.open(safeHref, '_blank', 'noopener,noreferrer'); } catch {}
                 }}
               >

@@ -60,6 +60,8 @@ interface Props {
   autoRulesEnabled?: boolean;
   /** once 规则命中后回调（用于父级关闭该规则）。 */
   onRuleConsumed?: (ruleId: string) => void;
+  /** Open HTTP(S) links in the workbench browser tab. */
+  onOpenUrl?: (url: string, title?: string) => void;
 }
 
 const WS_URL = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws-claude';
@@ -81,7 +83,7 @@ function normalizeResultContent(content: any): string {
 export default function ClaudeChat({
   active, defaultCwd, repoDir, provider,
   tabId, onSessionInfo, onCwdChange, injected, onInjectedConsumed,
-  autoRules, autoRulesEnabled, onRuleConsumed,
+  autoRules, autoRulesEnabled, onRuleConsumed, onOpenUrl,
 }: Props) {
   const [cwd, setCwd] = useState(defaultCwd);
   const [cwdDraft, setCwdDraft] = useState(defaultCwd);
@@ -480,7 +482,7 @@ export default function ClaudeChat({
   }
 
   return (
-    <div className="flex flex-col h-full bg-gray-900 text-gray-100">
+    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-gray-900 text-gray-100">
       {/* 顶部工具条：工作目录 + 连接状态 */}
       <div className="shrink-0 border-b border-gray-700 px-3 py-2 flex items-center gap-2 text-xs">
         <FolderOpen size={14} className="text-amber-400 shrink-0" />
@@ -543,7 +545,7 @@ export default function ClaudeChat({
       )}
 
       {/* 消息区 */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-3">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 py-3 space-y-3">
         {items.length === 0 && (
           <div className="text-gray-500 text-sm text-center mt-10">
             在下方输入消息，与 Claude Code 交互。工具调用会自动放行（bypass）。
@@ -561,7 +563,7 @@ export default function ClaudeChat({
             return (
               <div key={it.id} className="flex justify-start">
                 <div className="max-w-[92%] bg-gray-800 rounded-lg px-3 py-2 text-sm overflow-hidden">
-                  <MarkdownRenderer content={it.text} />
+                  <MarkdownRenderer content={it.text} onOpenUrl={onOpenUrl} />
                 </div>
               </div>
             );

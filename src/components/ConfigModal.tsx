@@ -16,6 +16,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
   const [apiKey, setApiKey] = useState('');
   const [source, setSource] = useState('');
   const [apiType, setApiType] = useState<ApiType>('openai');
+  const [isDefault, setIsDefault] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [models, setModels] = useState<string[]>([]);
@@ -33,9 +34,13 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       setApiKey(provider.apiKey);
       setSource(provider.source ?? '');
       setApiType(provider.apiType ?? 'openai');
+      setIsDefault(!!provider.isDefault);
       setSupportsVision(!!provider.supportsVision);
       setModels(provider.models);
       setSelectedModel(provider.selectedModel);
+    } else {
+      setName(''); setBaseUrl(''); setApiKey(''); setSource(''); setApiType('openai');
+      setIsDefault(false); setSupportsVision(false); setModels([]); setSelectedModel(''); setCustomModel('');
     }
   }, [provider]);
 
@@ -98,7 +103,10 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(errData.error || `HTTP ${res.status}`);
+        // HTTP errors came from the Python proxy/provider.  Do not append the
+        // generic "backend is not running" hint to a provider auth failure.
+        setError(errData.error || `HTTP ${res.status}`);
+        return;
       }
       const data = await res.json();
       const modelList = (data.models || []).sort();
@@ -132,6 +140,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
         source: source.trim() || undefined,
         supportsVision: supportsVision,
         apiType: apiType,
+        isDefault,
         models: finalModels,
         selectedModel: finalModel,
       });
@@ -143,7 +152,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
 
   const modal = (
     <div
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[80] p-4 overflow-y-auto"
+      className="fixed inset-0 bg-black/70 z-[200] p-4 overflow-y-auto"
       onClick={onClose}
     >
       <div
@@ -219,7 +228,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1.5">Base URL</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1.5">{apiType === 'anthropic' ? 'Anthropic Base URL' : 'Base URL'}</label>
             <input
               type="text"
               value={baseUrl}
@@ -227,6 +236,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
               placeholder={apiType === 'anthropic' ? 'e.g. https://api.anthropic.com' : 'e.g. https://api.openai.com/v1'}
               className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
             />
+            {apiType === 'anthropic' && <p className="mt-1 text-xs text-gray-500">可填写官方地址或第三方 Anthropic 兼容网关；支持带或不带 <code className="text-cyan-300">/v1</code>，发送时自动使用 <code className="text-cyan-300">/v1/messages</code>。</p>}
           </div>
 
           <div>
@@ -236,7 +246,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
                 type={showKey ? 'text' : 'password'}
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
-                placeholder="sk-..."
+                placeholder="输入 API Key（格式不限）"
                 className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 pr-12 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
               />
               <button
@@ -247,6 +257,11 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
               </button>
             </div>
           </div>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={isDefault} onChange={e => setIsDefault(e.target.checked)} className="rounded border-gray-600 bg-gray-900 text-blue-500 focus:ring-blue-500" />
+            <span className="text-sm text-gray-300">设为默认大模型（新对话、虚拟终端右键识别使用）</span>
+          </label>
 
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={supportsVision} onChange={e => setSupportsVision(e.target.checked)} className="rounded border-gray-600 bg-gray-900 text-blue-500 focus:ring-blue-500" />

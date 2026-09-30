@@ -1,0 +1,419 @@
+{
+  "schema_version": 3,
+  "providers": [
+    {
+      "id": "chatgpt",
+      "name": "ChatGPT",
+      "url": "https://chatgpt.com/",
+      "enabled": true,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": [
+          "#prompt-textarea",
+          "textarea[data-id='root']",
+          "div[contenteditable='true'][role='textbox']"
+        ],
+        "send": [
+          "#composer-submit-button",
+          "button[data-testid='composer-submit-button']",
+          "button[data-testid='send-button']",
+          "button[aria-label='Send prompt']",
+          "button[aria-label='发送提示']"
+        ],
+        "assistant": [
+          "[data-message-author-role='assistant']"
+        ],
+        "stop": [
+          "button[data-testid='stop-button']",
+          "button[aria-label='Stop streaming']",
+          "button[aria-label='停止生成']"
+        ],
+        "new_chat": [
+          "a[data-testid='create-new-chat-button']",
+          "button[data-testid='create-new-chat-button']"
+        ]
+      }
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "url": "https://chat.deepseek.com/",
+      "enabled": true,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": [
+          "#chat-input",
+          "textarea[placeholder*='DeepSeek']",
+          "textarea"
+        ],
+        "send": [
+          "button[aria-label='Send']",
+          "button[aria-label='发送']",
+          "div[role='button'][aria-label='Send']",
+          "div[role='button'][aria-label='发送']"
+        ],
+        "assistant": [
+          ".ds-markdown:not(.ds-think-content .ds-markdown)",
+          "[data-role='assistant']"
+        ],
+        "stop": [
+          "button[aria-label='Stop']",
+          "button[aria-label='停止生成']",
+          "div[role='button'][aria-label='Stop']",
+          "div[role='button'][aria-label='停止生成']"
+        ],
+        "new_chat": [
+          "a[href='/']",
+          "button[aria-label='New chat']"
+        ]
+      }
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen",
+      "url": "https://chat.qwen.ai/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": [
+          "#chat-input",
+          "textarea.message-input-textarea",
+          "textarea",
+          "div[contenteditable='true'][role='textbox']"
+        ],
+        "send": [
+          "button#send-message-button",
+          ".chat-prompt-send-button button",
+          "button.send-button",
+          ".message-input-right-button-send",
+          "button[data-testid='send-button']",
+          "button[aria-label='Send Message']",
+          "button[aria-label='Send']",
+          "button[aria-label='发送']"
+        ],
+        "assistant": [
+          "[data-message-author-role='assistant']",
+          "[data-message-role='assistant']",
+          "[data-role='assistant']",
+          "[data-testid='assistant-message']",
+          ".chat-assistant",
+          ".assistant-message",
+          "[id^='response-message-']",
+          "[data-role='assistant'] .qwen-markdown",
+          ".chat-assistant .qwen-markdown",
+          ".qwen-markdown"
+        ],
+        "stop": [
+          "#stop-response-button",
+          "button[data-testid='stop-button']",
+          "button[aria-label='Stop generating']",
+          "button[aria-label='Stop']",
+          "button[aria-label='停止生成']"
+        ],
+        "new_chat": [
+          "button[aria-label='New chat']",
+          "button[aria-label='新建对话']",
+          "button[aria-label='新对话']",
+          "button[data-testid='new-chat-button']",
+          "a[data-testid='new-chat-button']",
+          "a[href='/']"
+        ]
+      }
+    },
+    {
+      "id": "claude",
+      "name": "Claude",
+      "url": "https://claude.ai/new",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": [
+          "div[contenteditable='true'].ProseMirror",
+          "div[contenteditable='true'][role='textbox']"
+        ],
+        "send": [
+          "button[aria-label='Send message']",
+          "button[aria-label='Send Message']",
+          "button[aria-label='发送消息']"
+        ],
+        "assistant": [
+          "[data-testid='assistant-message']",
+          ".font-claude-response"
+        ],
+        "stop": [
+          "button[aria-label='Stop response']",
+          "button[aria-label='Stop Response']",
+          "button[aria-label='停止回复']"
+        ],
+        "new_chat": [
+          "a[href='/new']"
+        ]
+      }
+    },
+    {
+      "id": "grok",
+      "name": "Grok",
+      "url": "https://grok.com/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": [
+          "div.ProseMirror[contenteditable=\"true\"][role=\"textbox\"]",
+          "[data-testid=\"grokInput\"]",
+          "textarea[aria-label='Ask Grok anything']",
+          "textarea",
+          "div[contenteditable='true'][role='textbox']"
+        ],
+        "send": [
+          "button[aria-label=\"Send message\"]",
+          "button[aria-label=\"提交\"]",
+          "[data-testid=\"grokSend\"]",
+          "[data-testid=\"grok-send-button\"]",
+          "[data-testid=\"grokSendButton\"]",
+          "button[aria-label='Submit']",
+          "button[aria-label='Send']",
+          "button[type='submit']"
+        ],
+        "assistant": [
+          "[data-testid='assistant-message']",
+          "[data-role='assistant']",
+          "[data-message-author-role='assistant']",
+          ".message-bubble.bg-surface-l1 .markdown"
+        ],
+        "stop": [
+          "button[aria-label='Stop']",
+          "button[aria-label='Stop generating']",
+          "button[aria-label='停止']"
+        ],
+        "new_chat": [
+          "a[href='/']"
+        ]
+      }
+    },
+    {
+      "id": "glm",
+      "name": "GLM（Z.ai）",
+      "url": "https://chat.z.ai/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": [
+          "#chat-input[contenteditable=\"true\"]",
+          "#chat-input textarea",
+          "#chat-input [contenteditable=\"true\"]",
+          ".ProseMirror[contenteditable=\"true\"]",
+          ".tiptap[contenteditable=\"true\"]",
+          "textarea#chat-input",
+          "textarea[data-testid='chat-input']",
+          "[data-testid='chat-input'][contenteditable='true']",
+          "textarea[placeholder*='发送消息']",
+          "textarea[placeholder*='输入']",
+          "div[contenteditable='true'][role='textbox']"
+        ],
+        "send": [
+          "button#send-message-button",
+          "button#send-button",
+          "button.sendMessageButton",
+          "button[aria-label='Send Message']",
+          "button[data-testid='send-button']",
+          "button[aria-label='发送消息']",
+          "button[aria-label='发送']",
+          "button[aria-label='Send message']",
+          "button[aria-label='Send']"
+        ],
+        "assistant": [
+          "[data-message-role='assistant']",
+          ".assistant-message",
+          "[data-testid='assistant-message']",
+          "[data-message-author-role='assistant']",
+          "[data-role='assistant']",
+          ".chatglm-message.assistant",
+          ".message-item.assistant"
+        ],
+        "stop": [
+          "button[data-testid='stop-button']",
+          "button[aria-label='停止生成']",
+          "button[aria-label='停止回答']",
+          "button[aria-label='Stop generating']"
+        ],
+        "new_chat": [
+          "button[data-testid='new-chat-button']",
+          "a[data-testid='new-chat-button']",
+          "#sidebar-new-chat-button",
+          "button[aria-label='New chat' i]",
+          "a[aria-label='New chat' i]",
+          "button[aria-label='新建对话']",
+          "button[aria-label='新对话']"
+        ]
+      }
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "url": "https://www.kimi.com/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": [
+          "textarea[data-testid='chat-input']",
+          "[data-testid='chat-input'][contenteditable='true']",
+          ".chat-input-editor[contenteditable='true']",
+          "textarea[placeholder*='输入']",
+          "div[contenteditable='true'][role='textbox']"
+        ],
+        "send": [
+          ".send-button-container",
+          "button[data-testid='send-button']",
+          "button.send-button",
+          "button[aria-label='发送消息']",
+          "button[aria-label='发送']",
+          "button[aria-label='Send message']"
+        ],
+        "assistant": [
+          ".chat-content-item-assistant",
+          "[data-testid='assistant-message']",
+          "[data-message-author-role='assistant']",
+          "[data-role='assistant']",
+          ".message-item.assistant"
+        ],
+        "stop": [
+          "button[data-testid='stop-button']",
+          "button[aria-label='停止生成']",
+          "button[aria-label='停止回答']",
+          "button[aria-label='Stop generating']"
+        ],
+        "new_chat": [
+          "button[data-testid='new-chat-button']",
+          "a[data-testid='new-chat-button']",
+          "button[aria-label='新建会话']",
+          "button[aria-label='新建对话']"
+        ]
+      }
+    },
+    {
+      "id": "doubao",
+      "name": "豆包",
+      "url": "https://www.doubao.com/chat/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": ["[data-testid='chat_input_input'] .tiptap[contenteditable='true']", "[data-testid='chat_input_input'] [contenteditable='true']", ".tiptap.ProseMirror[contenteditable='true']", "textarea[placeholder*='输入']", "textarea[placeholder*='问题']", "[contenteditable='true'][role='textbox']", "textarea"],
+        "send": ["button[aria-label*='发送']", "button[aria-label*='Send' i]", "button[data-testid*='send' i]", "button[type='submit']"],
+        "assistant": ["[data-testid*='assistant' i]", "[data-testid*='message' i] [data-testid*='content' i]", "[data-role='assistant']", "[class*='assistant' i] [class*='markdown' i]", "[class*='markdown' i]"],
+        "stop": ["button[aria-label*='停止']", "button[aria-label*='Stop' i]"],
+        "new_chat": ["button[aria-label*='新对话']", "button[aria-label*='新建']", "a[href*='/chat']"]
+      }
+    },
+    {
+      "id": "yuanbao",
+      "name": "腾讯元宝",
+      "url": "https://yuanbao.tencent.com/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": [".ql-editor[contenteditable='true']", "#searchbar-editor[contenteditable='true']", "div[data-placeholder*='登录后输入']", "textarea[placeholder*='输入']", "textarea[placeholder*='问题']", "[contenteditable='true'][role='textbox']", "textarea"],
+        "send": ["#yuanbao-send-btn", "a[aria-label='Send']", "a[aria-label='发送']", "button[aria-label*='发送']", "button[aria-label*='Send' i]", "button[data-testid*='send' i]", "button[type='submit']"],
+        "user": [".agent-chat__conv--human", ".agent-chat__conv--human__text-wrap--collapsed"],
+        "assistant": [".agent-chat__conv--ai__speech_show", ".agent-chat__bubble--ai", "[data-testid*='assistant' i]", "[data-testid*='message' i] [data-testid*='content' i]", "[data-role='assistant']", "[class*='assistant' i] [class*='markdown' i]", "[class*='markdown' i]"],
+        "stop": ["button[aria-label*='停止']", "button[aria-label*='Stop' i]"],
+        "new_chat": ["button[aria-label*='新对话']", "button[aria-label*='新建']", "a[href*='/chat']"]
+      }
+    },
+    {
+      "id": "mimo",
+      "name": "小米 MiMo",
+      "url": "https://aistudio.xiaomimimo.com/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": ["textarea[placeholder*='Ask me anything' i]", "textarea[placeholder*='输入']", "textarea[placeholder*='message' i]", "[contenteditable='true'][role='textbox']", "textarea"],
+        "send": ["button[data-track-name='chat_send']", "button[aria-label*='Send message' i]", "button[aria-label*='发送']", "button[aria-label*='Send' i]", "button[data-testid*='send' i]", "button[type='submit']"],
+        "assistant": ["[data-testid*='assistant' i]", "[data-testid*='message' i] [data-testid*='content' i]", "[data-role='assistant']", "[class*='assistant' i] [class*='markdown' i]", "[class*='markdown' i]"],
+        "stop": ["button[aria-label*='停止']", "button[aria-label*='Stop' i]"],
+        "new_chat": ["button[aria-label*='新对话']", "button[aria-label*='新建']", "a[href*='/chat']"]
+      }
+    },
+    {
+      "id": "baidu",
+      "name": "百度文心",
+      "url": "https://wenxin.baidu.com/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": ["textarea[placeholder*='输入']", "textarea[placeholder*='问题']", "[contenteditable='true'][role='textbox']", "textarea"],
+        "send": ["button[aria-label*='发送']", "button[aria-label*='Send' i]", "button[data-testid*='send' i]", "button[type='submit']"],
+        "assistant": ["[data-testid*='assistant' i]", "[data-testid*='message' i] [data-testid*='content' i]", "[data-role='assistant']", "[class*='assistant' i] [class*='markdown' i]", "[class*='markdown' i]"],
+        "stop": ["button[aria-label*='停止']", "button[aria-label*='Stop' i]"],
+        "new_chat": ["button[aria-label*='新对话']", "button[aria-label*='新建']", "a[href*='/chat']"]
+      }
+    },
+    {
+      "id": "spark",
+      "name": "讯飞星火",
+      "url": "https://spark.xfyun.cn/",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": ["textarea[placeholder*='输入']", "textarea[placeholder*='问题']", "[contenteditable='true'][role='textbox']", "textarea"],
+        "send": ["button[aria-label*='发送']", "button[aria-label*='Send' i]", "button[data-testid*='send' i]", "button[type='submit']"],
+        "assistant": ["[data-testid*='assistant' i]", "[data-testid*='message' i] [data-testid*='content' i]", "[data-role='assistant']", "[class*='assistant' i] [class*='markdown' i]", "[class*='markdown' i]"],
+        "stop": ["button[aria-label*='停止']", "button[aria-label*='Stop' i]"],
+        "new_chat": ["button[aria-label*='新对话']", "button[aria-label*='新建']", "a[href*='/chat']"]
+      }
+    },
+    {
+      "id": "stepfun",
+      "name": "阶跃星辰",
+      "url": "https://chat.stepfun.com/chats/new",
+      "enabled": false,
+      "proxy": "",
+      "access_interval_seconds": 0,
+      "selectors": {
+        "input": ["textarea[placeholder*='输入']", "textarea[placeholder*='message' i]", "textarea[placeholder*='What do you want to know' i]", "[contenteditable='true'][role='textbox']", "textarea"],
+        "send": ["button[aria-label*='发送']", "button[aria-label*='Send' i]", "button[data-testid*='send' i]", "button[type='submit']"],
+        "assistant": ["[data-testid*='assistant' i]", "[data-testid*='message' i] [data-testid*='content' i]", "[data-role='assistant']", "[class*='assistant' i] [class*='markdown' i]", "[class*='markdown' i]"],
+        "stop": ["button[aria-label*='停止']", "button[aria-label*='Stop' i]"],
+        "new_chat": ["button[aria-label*='新对话']", "button[aria-label*='新建']", "a[href*='/chats']"]
+      }
+    }
+  ],
+  "fusion": {
+    "mode": "web",
+    "provider": "chatgpt",
+    "base_url": "http://127.0.0.1:11434/v1",
+    "api_key": "",
+    "model": "",
+    "timeout_seconds": 600
+  },
+  "generation": {
+    "timeout_seconds": 600,
+    "stable_seconds": 6,
+    "min_wait_seconds": 10,
+    "submission_timeout_seconds": 120,
+    "recovery_timeout_seconds": 180,
+    "input_chunk_chars": 4096,
+    "input_chunk_delay_ms": 35,
+    "submit_settle_seconds": 2,
+    "qwen_retry_stages": true,
+    "qwen_retry_screenshot": true,
+    "qwen_retry_learning": true,
+    "qwen_retry_trigger_wait_seconds": 3,
+    "qwen_manual_retry_wait_seconds": 20
+  },
+  "allow_partial": false,
+  "chat": {
+    "timeout_seconds": 180
+  }
+}

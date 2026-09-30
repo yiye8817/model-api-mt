@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+  <title>MultiLLM Fusion</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- The Fusion runtime is vendored under this project, while npm modules are
+       installed once at the workspace root. Keep this window self-contained
+       without requiring a second node_modules tree. -->
+  <script defer src="../../node_modules/marked/lib/marked.umd.js"></script>
+  <script defer src="../../node_modules/dompurify/dist/purify.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="#" id="brand-home" aria-label="MultiLLM Fusion 首页"><span><strong>MultiLLM Fusion</strong></span></a>
+    <nav class="app-tabs" aria-label="工作区">
+      <button class="app-tab active" type="button" data-app-tab="fusion" aria-selected="true"><strong>融合对话</strong></button>
+      <div id="app-tab-dynamic" class="app-tab-dynamic" role="tablist" aria-label="已打开的工具标签"></div>
+      <button class="app-tab" type="button" data-app-tab="desktop-agent" aria-selected="false"><strong>Desktop Agent</strong></button>
+      <div class="app-tab-add-wrap">
+        <button id="app-tab-add" class="app-tab-add" type="button" aria-label="新建标签" aria-haspopup="menu" aria-expanded="false">＋</button>
+        <div id="app-tab-menu" class="app-tab-menu" role="menu" hidden>
+          <span class="app-tab-menu-label">新建标签</span>
+          <button type="button" role="menuitem" data-create-tab="chat"><strong>Provider 对话</strong><small>使用已配置的 Provider 对话</small></button>
+          <button type="button" role="menuitem" data-create-tab="claude"><strong>Claude Code 终端</strong><small>新建独立虚拟终端标签</small></button>
+          <button type="button" role="menuitem" data-create-tab="hermes"><strong>Hermes 终端</strong><small>新建独立虚拟终端标签</small></button>
+          <button type="button" role="menuitem" data-create-tab="codex"><strong>Codex 终端</strong><small>新建独立虚拟终端标签</small></button>
+          <button type="button" role="menuitem" data-create-tab="web"><strong>网页</strong><small>新建简易浏览器标签</small></button>
+          <button type="button" role="menuitem" data-create-tab="providers"><strong>Provider 配置</strong><small>模型、上下文与连通性</small></button>
+        </div>
+      </div>
+    </nav>
+    <div class="header-actions"><span class="connection-badge" id="connection-status"><span class="status-dot"></span><span>正在连接服务</span></span><span class="header-divider"></span><button class="button primary header-run-button" id="project-run" type="button"><span aria-hidden="true">▶</span> 项目运行</button><button class="button subtle" id="open-api">API 接入 <span aria-hidden="true">↗</span></button><button class="button subtle" id="open-settings"><span aria-hidden="true">⚙</span> 设置</button></div>
+  </header>
+
+  <main id="workspace" class="workspace">
+    <aside id="fusion-sidebar" class="fusion-sidebar" aria-label="Fusion 工作区侧栏">
+      <div class="sidebar-heading"><div class="sidebar-mark" aria-hidden="true">M</div><div><strong>工作区</strong><small>本地会话</small></div><button id="sidebar-toggle" class="sidebar-icon-button" type="button" aria-label="收起侧栏" title="收起侧栏">‹</button></div>
+      <button id="sidebar-new-chat" class="sidebar-new-chat" type="button"><span aria-hidden="true">＋</span><span>新建对话</span><kbd>⌘ N</kbd></button>
+      <nav class="sidebar-workspaces" aria-label="工作区快捷入口"><span class="sidebar-label">WORKSPACES</span><button class="sidebar-workspace active" type="button" data-app-tab="fusion"><span class="sidebar-workspace-icon">✦</span><span><strong>融合对话</strong><small>MultiLLM</small></span></button><button class="sidebar-workspace" type="button" data-app-tab="desktop-agent"><span class="sidebar-workspace-icon agent">⌘</span><span><strong>Desktop Agent</strong><small>任务自动化</small></span></button></nav>
+      <section class="sidebar-section"><div class="sidebar-section-heading"><span class="sidebar-label">MODELS</span><span class="sidebar-count" id="sidebar-model-count">0</span></div><div id="sidebar-provider-list" class="sidebar-provider-list"><div class="sidebar-empty">配置加载中…</div></div></section>
+      <section class="sidebar-section sidebar-history-section"><div class="sidebar-section-heading"><span class="sidebar-label">RECENT CHATS</span><button id="sidebar-history-refresh" class="sidebar-refresh" type="button" title="刷新历史">↻</button></div><div id="sidebar-history-list" class="sidebar-history-list"><div class="sidebar-empty">暂无历史对话</div></div></section>
+      <div class="sidebar-footer"><button id="sidebar-settings" type="button"><span aria-hidden="true">⚙</span><span>设置</span></button><button id="sidebar-agent-help" type="button" data-app-tab="desktop-agent"><span aria-hidden="true">?</span><span>Agent</span></button></div>
+    </aside>
+    <section id="chat-panel" class="chat-panel" aria-label="融合对话">
+      <div class="panel-heading"><div><span class="eyebrow">WORKSPACE</span><h1 id="conversation-title">新的对话</h1></div><div class="chat-actions"><label class="sr-only" for="history-select">历史对话</label><select id="history-select" title="打开历史对话"><option value="">历史对话</option></select><button class="icon-button" id="new-chat" title="新建对话" aria-label="新建对话">＋</button></div></div>
+      <div class="conversation-scroll" id="conversation-scroll">
+        <div class="empty-state" id="empty-state">
+          <div class="empty-symbol" aria-hidden="true"><span>✦</span><i></i><b>✦</b></div>
+          <div class="eyebrow blue">THINK TOGETHER</div>
+          <h2>汇集不同思路，<br>得到更完整的答案。</h2>
+          <p>一个问题，同时交给多个模型。<br>保留各方原文，再按语义整合成一份 Markdown。</p>
+          <div class="flow-steps"><span><b>01</b> 共同提问</span><i>→</i><span><b>02</b> 独立回答</span><i>→</i><span><b>03</b> 语义整合</span></div>
+          <div class="starter-list" aria-label="试试这些问题"><button class="starter" data-prompt="请给出一套 Android 系统内存泄漏的排查方案，区分 Java、Native 和内核内存，列出采集命令、判断依据以及常见误区。"><span>系统排障</span><strong>设计 Android 内存泄漏排查方案</strong><i>↗</i></button><button class="starter" data-prompt="请从正确性、可维护性和性能三个方面设计一个 Python 异步任务队列，给出可运行示例，并说明超时、取消和异常处理策略。"><span>方案比较</span><strong>让多个模型一起审视技术方案</strong><i>↗</i></button></div>
+        </div>
+        <div id="messages" class="messages" aria-live="polite" aria-relevant="additions"></div>
+      </div>
+      <div class="composer-zone">
+        <div class="inline-alert" id="chat-error" role="alert" hidden></div>
+        <div class="run-status" id="run-status" role="status" hidden><span class="spinner"></span><span id="run-status-text">正在等待模型回答…</span><span id="elapsed-time"></span></div>
+        <section id="model-progress" class="model-progress" aria-label="本轮各模型处理状态" hidden><div id="model-progress-summary" role="status"></div><div id="model-progress-rows"></div></section>
+        <form id="prompt-form" class="composer"><label for="prompt" class="sr-only">输入你的问题</label><textarea id="prompt" rows="3" placeholder="输入一个问题，让多个模型一起思考…" maxlength="200000"></textarea><div class="composer-footer"><span id="composer-note">请先在右侧完成模型网页登录</span><button id="send-button" type="submit" class="button primary" disabled><span id="send-label">发送</span><span aria-hidden="true">↑</span></button></div></form>
+        <div class="composer-hint"><span>Ctrl / ⌘ + Enter 发送</span><span id="fusion-description">语义整合 · 保留原文</span></div>
+      </div>
+    </section>
+
+    <div id="workspace-splitter" class="resize-splitter" role="separator" tabindex="0" aria-label="调整对话和模型工作区宽度" aria-controls="chat-panel browser-panel" aria-orientation="vertical" aria-valuemin="20" aria-valuemax="80" aria-valuenow="36" title="拖动调整宽度；方向键微调，Home / End 调整到最小 / 最大"></div>
+    <section id="browser-panel" class="browser-panel" aria-label="模型网页">
+      <div class="browser-heading"><div><span class="eyebrow">MODEL BROWSER</span><h2>模型工作区 <span class="count-pill" id="enabled-count">0</span></h2></div><button class="icon-button" id="reload-provider" aria-label="重新加载当前模型网页" title="重新加载当前模型网页">↻</button></div>
+      <div class="layout-toolbar"><label for="layout-mode">打开方式</label><select id="layout-mode"><option value="split" selected>双栏并排</option><option value="tabs">标签页</option><option value="windows">独立窗口</option></select><button id="show-model-windows" class="button subtle" type="button" hidden>重新显示窗口</button><button id="diagnose-send" class="button subtle" type="button">检测发送按钮</button><span id="layout-active-provider"></span><span id="layout-hint">拖动分隔条调整大小</span></div>
+      <div id="input-visibility-note" class="input-visibility-note" role="status" hidden></div>
+      <div id="recovery-actions" class="layout-toolbar" aria-label="处理模型网页重试" hidden></div>
+      <div class="provider-tabs" id="provider-tabs" role="tablist" aria-label="选择模型网页"></div>
+      <div class="login-tip" id="login-tip"><span class="tip-symbol" aria-hidden="true">i</span><p><strong>首次使用：分别登录每个模型</strong><br>可在“设置 → 浏览器登录”导入 Firefox、Chrome 等浏览器的登录信息，再到网页确认；也可直接在这里登录。</p><button class="icon-button small" id="dismiss-login-tip" aria-label="收起登录提示">×</button></div>
+      <div class="web-address"><span class="status-dot" id="provider-state-dot"></span><span id="provider-address">正在加载模型配置…</span><span id="provider-state-label">等待连接</span></div>
+      <div id="webview-group" class="webview-group">
+        <div class="model-pane" id="model-pane-0"><label class="pane-heading" id="pane-heading-0" hidden><span>左侧模型</span><select id="pane-provider-0" aria-label="左侧模型"></select><span class="pane-status" id="pane-status-0"></span></label><div id="webview-placeholder" class="webview-placeholder" aria-label="第一个模型的原生浏览器视图"><div class="browser-loading"><span class="browser-window-icon" aria-hidden="true">▤</span><h3>在这里与模型连接</h3><p>模型网页将在此打开。<br>登录后，在左侧开始你的第一轮对话。</p></div></div></div>
+        <div id="panes-splitter" class="resize-splitter" role="separator" tabindex="0" aria-label="调整左右模型宽度" aria-controls="model-pane-0 model-pane-1" aria-orientation="vertical" aria-valuemin="20" aria-valuemax="80" aria-valuenow="50" title="拖动调整两个网页的宽度；方向键微调" hidden></div>
+        <div class="model-pane" id="model-pane-1" hidden><label class="pane-heading"><span>右侧模型</span><select id="pane-provider-1" aria-label="右侧模型"></select><span class="pane-status" id="pane-status-1"></span></label><div id="webview-placeholder-1" class="webview-placeholder" aria-label="第二个模型的原生浏览器视图"><div class="browser-loading"><h3>第二个模型网页</h3><p>两个网页可同时显示。</p></div></div></div>
+      </div>
+      <div id="windows-placeholder" class="windows-placeholder" hidden><span class="browser-window-icon" aria-hidden="true">▤</span><h3>模型已使用独立窗口打开</h3><p>每个窗口都可移动、缩放。<br>点击上方模型标签可定位对应窗口；关闭后可重新显示。</p></div>
+      <div class="browser-footer"><span id="provider-message">网页登录由你手动完成</span><span class="live-indicator">独立会话</span></div>
+    </section>
+  </main>
+
+  <main id="settings-view" class="settings-view" hidden>
+    <div class="settings-top"><div><span class="eyebrow">PREFERENCES</span><h1>让模型按你的方式协作</h1><p>配置网页、整合方式和本地 API。</p></div><button class="button" id="close-settings">返回对话 <span aria-hidden="true">↗</span></button></div>
+    <nav class="settings-nav" aria-label="设置分类"><button class="settings-tab active" data-section="models">模型网页</button><button class="settings-tab" data-section="providers">Provider 配置</button><button class="settings-tab" data-section="browser-login">浏览器登录</button><button class="settings-tab" data-section="fusion">语义整合</button><button class="settings-tab" data-section="advanced">生成参数</button><button class="settings-tab" data-section="api">API 接入</button></nav>
+    <div class="settings-scroll">
+      <form id="settings-form" novalidate>
+        <section class="settings-section" id="browser-login-section" data-settings-section="browser-login" hidden>
+          <div class="section-intro"><h2>复用你在浏览器中的登录</h2><p>选择本机浏览器配置与目标模型，手动导入一次当前登录信息。导入后请在模型网页确认；源浏览器退出登录后，需要再次导入或在应用内重新登录。</p></div>
+          <div class="settings-card">
+            <div class="browser-login-heading"><h3>从本机浏览器导入</h3><button type="button" id="detect-browser-profiles" class="button">重新检测</button></div>
+            <p id="browser-profiles-status" class="help-text" role="status">进入此页后检测浏览器配置目录。</p>
+            <div id="browser-profiles-empty" class="note-card browser-login-note" hidden><strong>尚未发现可用的浏览器配置</strong><p>请先用当前 Linux 用户启动 Firefox、Chrome、Chromium、Brave 或 Edge，并登录目标模型后重新检测。会检测常见安装以及 Snap、Flatpak 的标准配置目录；自定义目录或其他用户的配置可使用下方扩展导出。</p></div>
+            <div class="field-row browser-login-fields">
+              <label class="field"><span>来源浏览器 / 配置</span><select id="browser-profile-select" aria-describedby="browser-profile-details"><option value="">尚未检测</option></select></label>
+              <label class="field"><span>目标模型</span><select id="browser-login-provider"></select><small>仅显示已保存并启用的常见模型；修改模型配置后请先保存。</small></label>
+            </div>
+            <p id="browser-profile-details" class="browser-profile-details"></p>
+            <div id="browser-profiles-warnings" class="browser-login-warnings" hidden></div>
+            <p id="browser-crypto-guidance" class="help-text" hidden>Chromium 系浏览器解密支持尚不可用。请重新运行 ./run.sh 安装可选依赖 requirements-browser.txt；Firefox 可直接尝试导入，Chrome 等也可使用下方扩展。</p>
+            <button type="button" id="import-browser-login" class="button primary" disabled>从浏览器导入登录</button>
+            <p class="help-text">只导入所选模型的登录 Cookie。系统可能询问是否允许访问你自己的密钥环；数据库锁定、密钥环不可用或仅 Cookie 无法恢复登录时，可使用下方扩展导出。</p>
+          </div>
+          <div class="settings-card">
+            <div class="browser-login-heading"><h3>从浏览器扩展导入</h3><button type="button" id="import-login-file" class="button">导入登录文件</button></div>
+            <p class="help-text">在已登录的模型网页打开配套扩展，点击导出，再在这里选择 JSON 文件与上方目标模型。扩展可包含当前网页的 localStorage，适用于部分 DeepSeek / Qwen 登录方式。</p>
+            <ol class="browser-extension-steps"><li>Chrome / Chromium / Brave / Edge：在扩展管理页启用开发者模式，加载项目中的 <code>browser-extension/chromium</code> 文件夹。</li><li>Firefox：打开 <code>about:debugging#/runtime/this-firefox</code>，临时载入 <code>browser-extension/firefox/manifest.json</code>。</li><li>进入目标模型的 HTTPS 网页，在扩展中导出，再点击“导入登录文件”。JSON 包含登录会话，请妥善保管并在导入后删除不再需要的副本。</li></ol>
+            <p class="help-text">只同步 Cookie 与受支持的 localStorage；浏览器容器、分区会话及其他存储可能无法迁移。模型仍要求登录时，请在应用网页完成验证。</p>
+          </div>
+          <div id="browser-login-progress" class="note-card browser-login-note" role="status" hidden><strong>正在导入登录信息…</strong><p>暂时暂停对话与网页操作，完成后自动恢复。请等待系统密钥环提示或文件选择窗口。</p></div>
+          <div id="browser-login-error" class="inline-alert" role="alert" hidden></div>
+          <div id="browser-login-result" class="note-card browser-login-result" role="status" hidden><strong id="browser-login-summary"></strong><p id="browser-login-counts"></p><div id="browser-login-warnings" class="browser-login-warnings" hidden></div><p>返回对话并切换到该模型网页确认是否已登录；必要时完成网页验证。</p></div>
+        </section>
+        <section class="settings-section" id="settings-provider-section" data-settings-section="providers" hidden>
+          <div class="section-intro"><h2>配置 Provider</h2><p>为 Provider 对话、Claude Code、Hermes 和 Codex 保存 API 配置；可自动获取模型并测试连通性。</p></div>
+          <div class="settings-card settings-provider-card">
+            <div class="browser-login-heading"><h3>Provider</h3><div><select id="settings-provider-select" aria-label="选择 Provider"></select><button type="button" id="settings-provider-add" class="button">新增配置</button></div></div>
+            <div class="field-row"><label class="field"><span>配置名称</span><input id="settings-provider-name" type="text" maxlength="80" placeholder="例如：本地 Qwen"></label><label class="field"><span>API 类型</span><select id="settings-provider-type"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 兼容</option></select></label></div>
+            <label class="field"><span>API Base URL</span><input id="settings-provider-url" type="url" placeholder="http://127.0.0.1:11434/v1" autocomplete="off"></label>
+            <label class="field"><span>API Key</span><input id="settings-provider-key" type="password" maxlength="8192" placeholder="本地服务可留空" autocomplete="off" spellcheck="false"></label>
+            <div class="field-row"><label class="field"><span>模型</span><select id="settings-provider-model"><option value="">先自动获取模型</option></select></label><label class="field"><span>上下文大小（tokens）</span><input id="settings-provider-context" type="number" min="512" max="10000000" step="1" placeholder="自动检测"></label></div>
+            <div class="settings-provider-actions"><button type="button" id="settings-provider-fetch" class="button">自动获取模型</button><button type="button" id="settings-provider-test" class="button">测试是否可用</button><button type="button" id="settings-provider-save" class="button primary">保存 Provider</button></div>
+            <p id="settings-provider-status" class="help-text" role="status">请选择或新增一个 Provider。</p>
+          </div>
+        </section>
+        <section class="settings-section" data-settings-section="models"><div class="section-intro"><h2>选择参与回答的模型</h2><p>默认同时使用 ChatGPT 和 DeepSeek。可启用 1–16 个网页，分别登录后使用。</p></div><div id="provider-settings" class="provider-settings"></div><p class="help-text">代理示例：<code>http://127.0.0.1:10822</code> 或 <code>socks5://127.0.0.1:1080</code>。留空使用 Electron 默认代理配置。</p></section>
+        <section class="settings-section" data-settings-section="fusion" hidden><div class="section-intro"><h2>按语义整合回答</h2><p>汇总共同结论，补充独有信息，并保留存在分歧的观点。</p></div><div class="settings-card"><label class="field"><span>整合方式</span><select id="fusion-mode"><option value="web">使用已登录的模型网页</option><option value="api">使用 OpenAI 兼容 API</option></select></label><div id="web-fusion-fields"><label class="field"><span>负责整合的模型</span><select id="fusion-provider"></select><small>默认等待所有候选模型成功完成回答，再由该网页进行一次额外整合；慢响应不会提前触发融合。</small></label></div><div id="api-fusion-fields" hidden><label class="field"><span>API Base URL</span><input id="fusion-base-url" type="url" placeholder="http://127.0.0.1:11434/v1" autocomplete="off"><small>填写服务的 /v1 基地址；支持本机模型服务。</small></label><div class="field-row"><label class="field"><span>模型名称</span><input id="fusion-model" placeholder="填写 API 服务实际支持的模型名称" autocomplete="off"></label><label class="field"><span>API Key</span><input id="fusion-api-key" type="password" placeholder="本机服务可按服务要求留空" autocomplete="off" spellcheck="false"></label></div></div><label class="field narrow"><span>整合超时（秒）</span><input id="fusion-timeout" type="number" min="15" max="1200" step="1"></label></div><div class="settings-card"><label class="check-field"><input id="allow-partial" type="checkbox"><span><strong>高级：允许部分模型失败后继续</strong><small>默认关闭，要求所有候选模型成功；主动开启后仍等待所有候选任务结束，再使用成功回答并显示失败原因。</small></span></label></div></section>
+        <section class="settings-section" data-settings-section="advanced" hidden><div class="section-intro"><h2>等待与完成判断</h2><p>模型可能需要较长时间才确认接收。发送只执行一次，等待网页确认后继续等待完整回答；所有候选回答就绪后才开始整合。</p></div><div class="settings-card"><div class="field-row"><label class="field"><span>多模型候选回答总等待（秒）</span><input id="chat-timeout" type="number" min="15" max="1200" step="1"><small>默认 180 秒。所有候选模型共享同一时限，包含网页操作、访问间隔、人工验证和恢复等待；全部完成并保存原文后才整合。整合阶段使用独立超时。</small></label><label class="field"><span>单模型的生成超时（秒）</span><input id="generation-timeout" type="number" min="15" max="1200" step="1"><small>默认 600 秒，适用于单模型 API / Agent。多模型候选阶段还受上方 180 秒共同截止时间限制。</small></label><label class="field"><span>内容稳定时间（秒）</span><input id="generation-stable" type="number" min="2" max="60" step="1"><small>输出停止变化至少这么久，才可能视为完成。</small></label></div><div class="field-row"><label class="field"><span>接收确认等待时间（秒）</span><input id="generation-submission-timeout" type="number" min="15" max="600" step="1"><small>默认 120 秒；适用于 Qwen 等慢响应网页。等待确认期间不会再次点击发送。</small></label><label class="field"><span>提交后的最短等待时间（秒）</span><input id="generation-min-wait" type="number" min="2" max="120" step="1"></label></div></div><div class="settings-card"><h3>长输入与发送稳定性</h3><div class="field-row"><label class="field"><span>长输入分段字符数</span><input id="input-chunk-chars" type="number" min="256" max="16384" step="1"><small>默认 4096。Agent 的工具说明和历史在纯文本输入框分段写入并逐段校验，最后只发送一次；富文本编辑器保留一次原生写入并完整校验，不截断任务。</small></label><label class="field"><span>分段输入间隔（毫秒）</span><input id="input-chunk-delay" type="number" min="0" max="1000" step="1"><small>默认 35。供网页编辑器提交输入状态。</small></label><label class="field"><span>发送后页面保持上限（秒）</span><input id="submit-settle" type="number" min="0" max="10" step="0.1"><small>默认 2。Qwen / GLM 点击后短暂保持页面，检测到生成请求即释放给另一模型；不等待整篇回复，计入总超时。</small></label></div></div><div class="settings-card"><h3>Qwen 分级重试</h3><div class="field-row"><label class="field"><span>自动触发后的确认等待（秒）</span><input id="qwen-retry-trigger-wait" type="number" min="0.5" max="15" step="0.5"><small>默认 3 秒。先触发当前回合重试；未恢复且没有生成请求在途，才进入截图定位。</small></label><label class="field"><span>人工重试等待（秒）</span><input id="qwen-manual-retry-wait" type="number" min="1" max="120" step="1"><small>默认 20 秒。仍受本轮总截止时间限制。新请求开始后继续等完整回答，成功后保存点击控件供下次使用。</small></label></div><label><input id="qwen-retry-stages" type="checkbox"> 启用分级重试</label><label><input id="qwen-retry-screenshot" type="checkbox"> 使用本地截图辅助定位</label><label><input id="qwen-retry-learning" type="checkbox"> 记录成功人工重试控件</label><p>各级尝试记录在 logs/retry/qwen。默认保存截图，可能含聊天内容；FUSION_LOG_CONTENT=0 仅保存元数据。</p></div><div class="settings-card"><label class="field narrow"><span>网页异常后的恢复等待（秒）</span><input id="generation-recovery-timeout" type="number" min="0" max="600" step="1"><small>默认 180 秒，0 关闭。Qwen 按页面触发、截图模拟点击、人工等待依次恢复；其他模型保留单次明确按钮重试。每级均验证本轮会话和新请求。不会重新填入提示或刷新页面。</small></label></div><div class="note-card"><strong>关于网页模式</strong><p>GLM / Qwen 复用当前页面以保留手动选择的模型；其他站点按适配器准备新会话，并发送完整逻辑对话；左侧对话历史连续保留。网页 DOM 会变化，提取的 Markdown 保留主要结构，但不保证与网站原生导出完全一致。</p><p>若网页要求验证码、重新登录或出现额度限制，请在右侧手动处理。看到“请在网页重试”时，请保持原会话并点击本轮重试按钮；输入尚未提交时请核对后手动发送，程序会在恢复时限内继续等待。</p></div></section>
+        <section class="settings-section" data-settings-section="api" hidden><div class="section-intro"><h2>把协作能力接入你的工具</h2><p>通过本地 OpenAI 兼容接口调用这些已登录的模型网页。使用时保持桌面应用运行。</p></div><div class="settings-card"><div class="field"><span>Base URL</span><div class="copy-field"><input id="local-api-url" readonly aria-label="本地 API Base URL"><button type="button" class="button" id="copy-api-url">复制</button></div></div><div class="field"><span>API Key</span><div class="copy-field"><input id="local-api-token" type="password" readonly aria-label="本地 API Key"><button type="button" class="button" id="reveal-api-token">显示</button><button type="button" class="button" id="copy-api-token">复制</button></div><small>此密钥可调用你已登录的模型。请仅提供给你信任的本机客户端。</small></div><label class="field"><span>调用模型</span><select id="local-api-model" aria-describedby="local-api-model-help"><option value="web-fusion">多模型整合 · web-fusion</option></select><small id="local-api-model-help">仅列出已保存并启用的模型。web-fusion 调用多个模型并整合；选择单个模型只返回该模型的回答，不进行融合。API 也接受 chatgpt、deepseek、qwen、claude、grok、doubao、yuanbao、mimo、baidu、spark、stepfun 等对应的直接名称。</small></label><p class="help-text" id="local-api-directory"></p></div><div class="code-card"><div><strong>快速调用</strong><button type="button" class="button subtle" id="copy-curl">复制命令（含密钥）</button></div><pre id="curl-example"></pre></div><p class="help-text">支持 <code>GET /v1/models</code> 和 <code>POST /v1/chat/completions</code>。<code>stream: true</code> 会在完整结果生成后分块发送，并在等待期间保持连接；不提供网页的逐 token 实时流。当前接口只支持文本对话。</p></section>
+      </form>
+    </div>
+    <div class="settings-bottom"><div class="inline-alert" id="settings-error" role="alert" hidden></div><p id="settings-save-note">修改后保存生效。网页仍使用各自独立的登录会话。</p><div class="settings-save-actions"><button class="button" id="discard-settings">放弃修改</button><button class="button primary" id="save-settings">保存设置</button></div></div>
+  </main>
+
+  <main id="desktop-agent-view" class="desktop-agent-view" aria-label="Desktop Agent 工作区" hidden>
+    <aside class="agent-sidebar">
+      <div class="agent-side-brand"><span class="agent-logo" aria-hidden="true">⌘</span><div><strong>Desktop Agent</strong><small>Local task runner</small></div></div>
+      <button id="agent-open-terminal" class="agent-launch-button" type="button"><span aria-hidden="true">＋</span><span><strong>打开交互终端</strong><small>启动 desktop-agent chat</small></span><b aria-hidden="true">↗</b></button>
+      <div class="agent-side-section"><span class="agent-section-label">能力范围</span><div class="agent-capability-list"><span class="agent-capability files"><i></i>文件与工作区</span><span class="agent-capability web"><i></i>网页研究</span><span class="agent-capability shell"><i></i>命令执行</span><span class="agent-capability desktop"><i></i>桌面操作</span></div></div>
+      <div class="agent-side-footer"><span class="agent-health-dot" id="agent-health-dot"></span><span id="agent-health-label">等待启动</span><span class="agent-side-version">0.17</span></div>
+    </aside>
+    <section class="agent-content">
+      <div class="agent-content-heading"><div><span class="eyebrow agent-eyebrow">DESKTOP AUTOMATION</span><h1>把目标交给一个可核验的本地 Agent</h1><p>沿用 MultiLLM Fusion 的本地 API、任务记录和权限边界，在独立终端中执行文件、网页与桌面任务。</p></div><div class="agent-heading-actions"><span class="agent-parent-status"><span class="status-dot" id="agent-parent-dot"></span><span id="agent-parent-label">父服务状态检查中</span></span><button id="agent-open-readme" class="button subtle" type="button">查看使用说明 ↗</button><button id="agent-close-inplace" class="button subtle" type="button" hidden>返回当前页面</button></div></div>
+      <div class="agent-grid">
+        <section class="agent-task-card">
+          <div class="agent-card-heading"><div><span class="eyebrow">NEW TASK</span><h2>创建一个 Agent 任务</h2></div><span class="agent-card-index">01</span></div>
+          <form id="agent-task-form">
+            <label class="agent-field"><span>任务目标</span><textarea id="agent-task" rows="6" maxlength="100000" placeholder="例如：检查当前项目最近的测试失败，整理出原因并保存一份 Markdown 报告。"></textarea><small>任务会在新终端中执行；需要人工确认时可以直接在终端继续。</small></label>
+            <div class="agent-field-row"><label class="agent-field"><span>模型</span><select id="agent-model"><option value="">使用 Agent 配置</option><option value="chatgpt">ChatGPT</option><option value="deepseek">DeepSeek</option><option value="qwen">Qwen</option><option value="glm">GLM</option><option value="kimi">Kimi</option></select></label><label class="agent-field"><span>工作目录（可选）</span><input id="agent-workspace" type="text" placeholder="默认使用 Agent 配置" autocomplete="off"></label></div>
+            <fieldset class="agent-permissions"><legend>本次预先授权</legend><label><input id="agent-allow-shell" type="checkbox"><span>命令</span></label><label><input id="agent-allow-browser" type="checkbox"><span>浏览器</span></label><label><input id="agent-allow-desktop" type="checkbox"><span>桌面</span></label><span class="agent-permission-note">文件、Skill、网页检索默认可用</span></fieldset>
+            <div class="agent-form-actions"><button id="agent-run-task" class="button primary" type="submit"><span aria-hidden="true">▶</span>在终端运行任务</button><button id="agent-clear-task" class="button" type="button">清空</button></div>
+          </form>
+        </section>
+        <section class="agent-overview-card">
+          <div class="agent-card-heading"><div><span class="eyebrow">HOW IT WORKS</span><h2>一次任务，三层确认</h2></div><span class="agent-card-index">02</span></div>
+          <div class="agent-flow"><div><b>01</b><strong>观察</strong><p>读取当前网页、桌面或工作区状态。</p></div><i>↓</i><div><b>02</b><strong>执行</strong><p>每项修改动作都使用明确的权限范围。</p></div><i>↓</i><div><b>03</b><strong>核验</strong><p>保存任务记录与 Markdown 结果，便于复盘。</p></div></div>
+          <div class="agent-note"><span aria-hidden="true">i</span><p>需要完整交互时使用左侧“打开交互终端”。任务输入会以参数传入，不会复制到日志或拼接成 shell 命令。</p></div>
+        </section>
+      </div>
+      <section class="agent-terminal-card"><div class="agent-card-heading"><div><span class="eyebrow">SESSION CONSOLE</span><h2>本地会话</h2></div><span class="agent-console-state" id="agent-console-state">未启动</span></div><div id="agent-console" class="agent-console"><div class="agent-console-placeholder"><span aria-hidden="true">⌘</span><strong>终端会话将在这里打开</strong><p>点击“打开交互终端”开始连续对话，或提交上方任务直接运行。</p></div></div></section>
+    </section>
+  </main>
+
+  <main id="workbench-view" class="workbench-view" aria-label="虚拟终端标签" hidden>
+    <section class="workbench-main">
+      <section id="workbench-providers-panel" class="workbench-panel" data-workbench-panel="providers" hidden>
+        <div class="workbench-panel-heading"><div><span class="eyebrow workbench-eyebrow">PROVIDER CONFIG</span><h1>配置 Provider</h1><p>保存的 Provider 会用于 Provider 对话和对应的代码终端。</p></div><div class="workbench-heading-actions"><span class="workbench-status-pill" id="workbench-provider-test-status">等待检测</span><button id="workbench-add-provider" class="button subtle" type="button">新增配置</button></div></div>
+        <div id="workbench-provider-list" class="workbench-provider-list workbench-provider-list-inline"><div class="workbench-empty">尚未配置大模型</div></div>
+        <div class="workbench-provider-layout">
+          <section class="workbench-config-card">
+            <div class="workbench-card-heading"><h2>连接配置</h2><button id="workbench-delete-provider" class="button subtle" type="button">删除</button></div>
+            <label class="workbench-field"><span>配置名称</span><input id="workbench-provider-name" type="text" maxlength="80" placeholder="例如：本地 Qwen"></label>
+            <label class="workbench-field"><span>API 类型</span><select id="workbench-provider-type"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 兼容</option></select></label>
+            <label class="workbench-field"><span>API Base URL</span><input id="workbench-provider-url" type="url" placeholder="http://127.0.0.1:11434/v1" autocomplete="off"></label>
+            <label class="workbench-field"><span>API Key</span><input id="workbench-provider-key" type="password" maxlength="8192" placeholder="本地服务可留空" autocomplete="off" spellcheck="false"></label>
+            <div class="workbench-field-row"><label class="workbench-field"><span>模型</span><select id="workbench-provider-model"><option value="">先自动获取模型</option></select></label><button id="workbench-refresh-models" class="button subtle workbench-refresh-models" type="button">自动获取</button></div>
+            <label class="workbench-field"><span>上下文大小（tokens）</span><input id="workbench-provider-context" type="number" min="512" max="10000000" step="1" placeholder="自动检测，也可手动填写"></label>
+            <div class="workbench-provider-actions"><button id="workbench-test-provider" class="button subtle" type="button">测试所选模型</button><button id="workbench-save-provider" class="button primary workbench-save-provider" type="button">保存配置</button></div>
+            <p id="workbench-config-error" class="workbench-inline-error" role="alert" hidden></p>
+          </section>
+          <section class="workbench-provider-summary"><div class="workbench-card-heading"><h2>连接状态</h2><span class="workbench-card-index">LIVE</span></div><div class="provider-metric-grid"><article><span>模型数量</span><strong id="workbench-provider-model-count">0</strong></article><article><span>上下文窗口</span><strong id="workbench-provider-context-value">未知</strong></article><article><span>连接状态</span><strong id="workbench-provider-connectivity">未测试</strong></article><article><span>响应时间</span><strong id="workbench-provider-latency">—</strong></article></div></section>
+        </div>
+      </section>
+      <section id="workbench-chat-panel" class="workbench-panel" data-workbench-panel="chat" hidden>
+        <div class="terminal-titlebar"><span class="terminal-dot green"></span><strong>Provider 对话终端</strong><label>Provider <select id="workbench-chat-provider"></select></label></div>
+        <div class="workbench-terminal-card workbench-chat-terminal"><div class="workbench-terminal-screen"><pre id="workbench-chat-messages" class="workbench-terminal-output" data-terminal-output="chat" aria-live="polite">Provider 对话终端已就绪。请选择已配置的 Provider，然后输入消息。</pre><form id="workbench-chat-form" class="workbench-terminal-prompt"><span class="workbench-terminal-prompt-symbol">›</span><textarea id="workbench-chat-input" rows="1" maxlength="200000" placeholder="输入消息，按 Enter 执行…"></textarea></form></div></div>
+      </section>
+      <section id="workbench-claude-panel" class="workbench-panel" data-workbench-panel="claude" hidden><div class="terminal-titlebar"><span class="terminal-dot purple"></span><strong>Claude Code 虚拟终端</strong><span class="terminal-command">claude</span></div><div id="workbench-claude-terminal-slot"></div></section>
+      <section id="workbench-hermes-panel" class="workbench-panel" data-workbench-panel="hermes" hidden><div class="terminal-titlebar"><span class="terminal-dot orange"></span><strong>Hermes 虚拟终端</strong><span class="terminal-command">hermes</span></div><div id="workbench-hermes-terminal-slot"></div></section>
+      <section id="workbench-codex-panel" class="workbench-panel" data-workbench-panel="codex" hidden><div class="terminal-titlebar"><span class="terminal-dot blue"></span><strong>Codex 虚拟终端</strong><span class="terminal-command">codex</span></div><div id="workbench-codex-terminal-slot"></div></section>
+      <section id="workbench-agent-panel" class="workbench-panel" data-workbench-panel="agent" hidden><div class="terminal-titlebar"><span class="terminal-dot green"></span><strong>Desktop Agent 虚拟终端</strong><span class="terminal-command">desktop-agent</span></div><div id="workbench-agent-terminal-slot"></div></section>
+      <section id="workbench-web-panel" class="workbench-panel" data-workbench-panel="web" hidden>
+        <section class="workbench-web-card"><div class="workbench-browser-toolbar" aria-label="简易浏览器工具栏"><button id="workbench-web-back" class="workbench-browser-button" type="button" title="后退" aria-label="后退">‹</button><button id="workbench-web-forward" class="workbench-browser-button" type="button" title="前进" aria-label="前进">›</button><button id="workbench-web-reload" class="workbench-browser-button" type="button" title="刷新" aria-label="刷新">↻</button><form id="workbench-web-form" class="workbench-address-form"><label class="sr-only" for="workbench-web-url">网页地址</label><input id="workbench-web-url" type="text" value="https://claude.ai/new" placeholder="输入网址或搜索地址" autocomplete="off" spellcheck="false"><button class="workbench-address-go" type="submit">打开</button></form><button id="workbench-web-favorite" class="workbench-browser-button" type="button" title="收藏当前网址" aria-label="收藏当前网址">☆</button><button id="workbench-web-copy" class="workbench-browser-button" type="button" title="复制地址" aria-label="复制地址">▣</button></div><div class="workbench-quick-links"><span>常用模型</span><button type="button" data-workbench-url="https://claude.ai/new">Claude</button><button type="button" data-workbench-url="https://chatgpt.com/">ChatGPT</button><button type="button" data-workbench-url="https://chat.deepseek.com/">DeepSeek</button><button type="button" data-workbench-url="https://chat.qwen.ai/">通义千问</button><button type="button" data-workbench-url="https://www.doubao.com/chat/">豆包</button><button type="button" data-workbench-url="https://yuanbao.tencent.com/">腾讯元宝</button><button type="button" data-workbench-url="https://www.kimi.com/">Kimi</button><button type="button" data-workbench-url="https://chat.z.ai/">智谱 GLM</button><button type="button" data-workbench-url="https://mimo.mi.com/">小米 MiMo</button><button type="button" data-workbench-url="https://wenxin.baidu.com/">百度文心</button><button type="button" data-workbench-url="https://spark.xfyun.cn/">讯飞星火</button><button type="button" data-workbench-url="https://chat.stepfun.com/">阶跃星辰</button><button type="button" data-workbench-url="https://gemini.google.com/">Gemini</button><button type="button" data-workbench-url="https://grok.com/">Grok</button><button type="button" data-workbench-url="https://poe.com/">Poe</button><button type="button" data-workbench-url="https://github.com/">GitHub</button><span class="workbench-favorites-label">收藏</span><div id="workbench-web-favorites" class="workbench-web-favorites" aria-label="已收藏网址"></div></div><div id="workbench-web-preview" class="workbench-web-preview"><div class="workbench-web-placeholder"><strong>简易浏览器</strong><span>输入地址后点击“打开”</span></div></div></section>
+      </section>
+    </section>
+  </main>
+
+  <div id="project-run-dialog" class="project-run-backdrop" role="dialog" aria-modal="true" aria-labelledby="project-run-title" hidden><section class="project-run-card"><div class="diagnostic-heading"><div><span class="eyebrow">PROJECT RUNNER</span><h2 id="project-run-title">生成并运行项目</h2></div><button id="close-project-run" class="button" type="button">关闭</button></div><p class="project-run-intro">选择语言和运行环境，描述你要做的项目。生成的结构化提示词会填入当前页面输入框，发送后即可运行回复中的代码文件。</p><div class="project-run-grid"><label class="field"><span>运行环境 / 语言</span><select id="project-run-language"><option value="python">Python</option><option value="shell">Shell</option><option value="javascript">JavaScript / Node.js</option><option value="c">C</option><option value="cpp">C++</option><option value="java">Java</option><option value="html">HTML</option></select></label><label class="field"><span>用于生成的 Provider</span><select id="project-run-provider"><option value="">请先配置 Provider</option></select></label></div><label class="field"><span>项目需求</span><textarea id="project-run-requirement" rows="6" maxlength="100000" placeholder="例如：生成一个读取 CSV 并统计每列平均值的 Python 项目，包含 requirements.txt、README.md 和可执行入口。"></textarea></label><div class="project-run-actions"><button id="project-generate-prompt" class="button primary" type="button">生成提示词并填入输入框</button><button id="project-run-last" class="button" type="button">运行最近一条回复</button></div><label class="field"><span>生成的提示词（可编辑）</span><textarea id="project-run-prompt" rows="6" readonly></textarea></label><div id="project-run-status" class="project-run-status" role="status"></div><pre id="project-run-output" class="project-run-output" hidden></pre></section></div>
+  <div id="send-diagnostic-dialog" class="diagnostic-backdrop" role="dialog" aria-modal="true" aria-labelledby="send-diagnostic-title" hidden><section class="diagnostic-card"><div class="diagnostic-heading"><h2 id="send-diagnostic-title">发送按钮检测</h2><button id="close-send-diagnostic" class="button" type="button">关闭</button></div><p>当前网页的只读检测结果；不会填充输入框或发送消息。输入框为空时按钮禁用、点击此工具后页面失去焦点，都可能是正常状态。</p><p id="send-diagnostic-summary"></p><pre id="send-diagnostic-json" tabindex="0"></pre><button id="copy-send-diagnostic" class="button primary" type="button">复制检测结果</button></section></div>
+  <div id="resize-overlay" class="resize-overlay" hidden aria-hidden="true"></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

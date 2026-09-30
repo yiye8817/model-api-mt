@@ -14,21 +14,27 @@
 #     ./run.sh deps         # 仅安装 / 升级 Python + Node 依赖
 #     ./run.sh tools        # 仅安装 / 检查 Claude、Hermes 等 CLI 可执行文件
 #     ./run.sh clean        # 清理 dist/ node_modules/ __pycache__/ .venv/
+#     ./run.sh electron     # 构建前端并以 Electron 桌面壳启动（可内嵌 DeepSeek 等站）
 #
 #   环境变量:
 #     PORT=8765        后端监听端口（也可通过 -p / 位置参数指定）
 #     HOST=0.0.0.0
 #     VENV_DIR=.venv   Python 虚拟环境目录
-#     SKIP_OPTIONAL=1  跳过可选依赖 (flask-sock / duckduckgo-search)
+#     SKIP_OPTIONAL=1  跳过可选依赖 (DDGS web_search)
 #     SKIP_CLI_TOOLS=1 跳过 Claude / Hermes 等 CLI 安装检查
-#     CLI_UPDATE=1     已安装的 CLI 也尝试更新到最新版（默认仅缺失时安装）
+#     CLI_UPDATE=0          跳过已安装 Claude/Codex CLI 的更新检查
+#     HERMES_CLI_UPDATE=1   启用 Hermes CLI 的版本更新检查（默认关闭）
 #     HERMES_INSTALL_ARGS="--skip-browser"  传给 hermes install.sh 的额外参数
 #     HERMES_PROXY=http://127.0.0.1:20809  下载/安装 Hermes 时使用的本地代理（空=直连）
+#     FLASK_DEBUG=1    开启 Flask debug/reloader（默认关闭，日志轮转使用单进程）
+#     LOG_DIR=logs     服务与大模型交互日志目录
+#     LOG_LLM_CONTENT=0 仅记录交互元数据，不保存提示词与回复正文
+#     ELECTRON_DISABLE_GPU=0 重新启用 Electron GPU（Linux 默认关闭以规避 VSync 错误）
 #
 #   核心 / 可选 Python 依赖:
 #     必需: flask, requests
 #     可选: flask-sock      （WebSocket PTY 真终端 /ws，仅 Unix）
-#           duckduckgo-search（/api/web-search 联网搜索）
+#           ddgs            （/api/web-search 的 DuckDuckGo 联网搜索）
 # ============================================================
 
 set -e
@@ -41,7 +47,9 @@ HOST="${HOST:-0.0.0.0}"
 VENV_DIR="${VENV_DIR:-.venv}"
 SKIP_OPTIONAL="${SKIP_OPTIONAL:-0}"
 SKIP_CLI_TOOLS="${SKIP_CLI_TOOLS:-0}"
-CLI_UPDATE="${CLI_UPDATE:-0}"
+CLI_UPDATE="${CLI_UPDATE:-1}"
+# Hermes 的版本检查会访问远程 Git/PyPI，默认关闭；需要时显式设置为 1。
+HERMES_CLI_UPDATE="${HERMES_CLI_UPDATE:-0}"
 HERMES_INSTALL_ARGS="${HERMES_INSTALL_ARGS:---skip-browser}"
 # 下载 Hermes 默认走本地 20809 代理（Clash/V2Ray 等）；设 HERMES_PROXY= 可关闭
 HERMES_PROXY="${HERMES_PROXY-http://127.0.0.1:20809}"
@@ -80,7 +88,7 @@ parse_args() {
                 CMD="help"
                 shift
                 ;;
-            build|dev|server|backend|all|deps|tools|cli|clean)
+            build|dev|server|backend|all|deps|tools|cli|clean|electron)
                 CMD="$1"
                 [ "$CMD" = "backend" ] && CMD="server"
                 [ "$CMD" = "cli" ] && CMD="tools"
@@ -278,22 +286,39 @@ _cli_version_line() {
     "$bin" "$@" 2>/dev/null | head -n1 | tr -d '\r' || true
 }
 
+_version_number() {
+    printf '%s\n' "$1" | grep -oE '[0-9]+(\.[0-9]+){1,3}([.-][0-9A-Za-z.]+)?' | head -n1 || true
+}
+
+_claude_latest_version() {
+    command -v npm >/dev/null 2>&1 || return 1
+    npm view @anthropic-ai/claude-code version --silent --fetch-timeout=10000 --fetch-retries=1 2>/dev/null | tail -n1 | tr -d '\r' || true
+}
+
 _install_claude_cli() {
-    local cli
+    local cli current_line current_version latest_version
     cli="$(_cli_executable claude)"
     if [ -n "$cli" ]; then
         if [ "$CLI_UPDATE" = "1" ]; then
-            log "更新 Claude Code..."
-            if "$cli" update >/dev/null 2>&1 \
-                || "$cli" install latest >/dev/null 2>&1; then
-                log "Claude Code 已更新: $(_cli_version_line "$cli" --version)"
-            else
-                if command -v npm >/dev/null 2>&1; then
-                    _install_claude_via_npm \
-                        || warn "Claude Code 自动更新失败，将继续使用当前版本"
+            current_line="$(_cli_version_line "$cli" --version)"
+            current_version="$(_version_number "$current_line")"
+            latest_version="$(_claude_latest_version || true)"
+            latest_version="$(_version_number "$latest_version")"
+            if [ -n "$current_version" ] && [ -n "$latest_version" ] \
+                && [ "$current_version" = "$latest_version" ]; then
+                log "Claude Code 已是最新版: $current_line"
+            elif [ -n "$latest_version" ]; then
+                log "发现 Claude Code 更新: ${current_version:-未知} -> $latest_version"
+                if "$cli" update >/dev/null 2>&1 \
+                    || _install_claude_via_npm; then
+                    hash -r 2>/dev/null || true
+                    cli="$(_cli_executable claude)"
+                    log "Claude Code 已更新: $(_cli_version_line "$cli" --version)"
                 else
                     warn "Claude Code 自动更新失败，将继续使用当前版本"
                 fi
+            else
+                warn "无法获取 Claude Code 最新版本，将继续使用: $current_line"
             fi
         else
             log "Claude Code 已就绪: $(_cli_version_line "$cli" --version)"
@@ -330,6 +355,151 @@ _install_claude_cli() {
     return 1
 }
 
+_hermes_version_output() {
+    local cli="$1" output
+    output="$("$cli" --version 2>&1 || true)"
+    if ! printf '%s\n' "$output" | grep -q 'Hermes Agent'; then
+        output="$("$cli" version 2>&1 || true)"
+    fi
+    printf '%s\n' "$output"
+}
+
+_hermes_version_line() {
+    _hermes_version_output "$1" | head -n1 | tr -d '\r'
+}
+
+_hermes_install_dir() {
+    _hermes_version_output "$1" | sed -n 's/^Install directory:[[:space:]]*//p' | head -n1
+}
+
+_hermes_report_failure() {
+    local label="$1" rc="$2" output="$3" line
+    warn "$label（exit=$rc）"
+    while IFS= read -r line; do
+        [ -n "$line" ] && warn "  $line"
+    done <<< "$output"
+}
+
+# 只清理 Git 明确报告的、位于 Hermes 自身 .git 下且未被占用的遗留锁。
+_hermes_recover_stale_lock() {
+    local cli="$1" output="$2" install_dir lock resolved
+    printf '%s\n' "$output" | grep -qE "Unable to create '.*\.lock'.*File exists" || return 1
+    install_dir="$(_hermes_install_dir "$cli")"
+    [ -n "$install_dir" ] && [ -d "$install_dir/.git" ] || return 1
+    lock="$(printf '%s\n' "$output" | sed -n "s#.*Unable to create '\([^']*\.lock\)'.*#\1#p" | head -n1)"
+    [ -n "$lock" ] || return 1
+    resolved="$(readlink -f "$lock" 2>/dev/null || true)"
+    case "$resolved" in
+        "$install_dir"/.git/*.lock) ;;
+        *) warn "拒绝清理 Hermes 仓库之外的锁文件: $lock"; return 1 ;;
+    esac
+    if command -v lsof >/dev/null 2>&1 && lsof "$resolved" >/dev/null 2>&1; then
+        warn "Hermes Git 锁仍被进程占用，不自动删除: $resolved"
+        return 1
+    fi
+    if command -v fuser >/dev/null 2>&1 && fuser "$resolved" >/dev/null 2>&1; then
+        warn "Hermes Git 锁仍被进程占用，不自动删除: $resolved"
+        return 1
+    fi
+    rm -f -- "$resolved"
+    log "已清理 Hermes 遗留 Git 锁: $resolved"
+}
+
+# 优先走可达的 HERMES_PROXY；代理失败或不可达时自动直连重试。
+_hermes_update_once() {
+    local cli="$1"
+    shift
+    local output rc proxy_output proxy_rc
+    if _hermes_proxy_env; then
+        if output="$(HTTP_PROXY="$HERMES_PROXY" HTTPS_PROXY="$HERMES_PROXY" ALL_PROXY="$HERMES_PROXY" \
+            http_proxy="$HERMES_PROXY" https_proxy="$HERMES_PROXY" all_proxy="$HERMES_PROXY" \
+            "$cli" update "$@" 2>&1)"; then
+            printf '%s\n' "$output"
+            return 0
+        else
+            proxy_rc=$?
+            proxy_output="$output"
+            printf '%s\n' "[代理尝试失败 exit=$proxy_rc]" "$proxy_output" "[改用直连重试]"
+        fi
+    elif [ -n "${HERMES_PROXY:-}" ]; then
+        printf '%s\n' "[代理 $HERMES_PROXY 不可达，改用直连]"
+    fi
+    if output="$(HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
+        "$cli" update "$@" 2>&1)"; then
+        printf '%s\n' "$output"
+        return 0
+    else
+        rc=$?
+        printf '%s\n' "$output"
+        return "$rc"
+    fi
+}
+
+_hermes_checked_update() {
+    local cli="$1" check_output update_output verify_output rc
+    log "检查 Hermes Agent 更新..."
+    if check_output="$(_hermes_update_once "$cli" --check)"; then
+        :
+    else
+        rc=$?
+        _hermes_report_failure "Hermes Agent 更新检查失败" "$rc" "$check_output"
+        if _hermes_recover_stale_lock "$cli" "$check_output"; then
+            log "清理遗留锁后重新检查 Hermes Agent 更新..."
+            if check_output="$(_hermes_update_once "$cli" --check)"; then
+                :
+            else
+                rc=$?
+                _hermes_report_failure "Hermes Agent 更新重试失败" "$rc" "$check_output"
+                return 1
+            fi
+        else
+            return 1
+        fi
+    fi
+    if printf '%s\n' "$check_output" | grep -qiE \
+        '(up[ -]?to[ -]?date|already.*latest|no update|0 commit(s)? behind)'; then
+        log "Hermes Agent 已是最新版（校验通过）: $(_hermes_version_line "$cli")"
+        return 0
+    fi
+
+    # 不依赖某一版本的提示文案：未明确为最新版时执行幂等更新。
+    log "发现或无法明确判断 Hermes Agent 更新状态，开始执行更新..."
+    if update_output="$(_hermes_update_once "$cli" --yes)"; then
+        :
+    else
+        rc=$?
+        _hermes_report_failure "Hermes Agent 更新失败" "$rc" "$update_output"
+        if _hermes_recover_stale_lock "$cli" "$update_output"; then
+            log "清理遗留锁后重新执行 Hermes Agent 更新..."
+            if update_output="$(_hermes_update_once "$cli" --yes)"; then
+                :
+            else
+                rc=$?
+                _hermes_report_failure "Hermes Agent 更新重试失败" "$rc" "$update_output"
+                return 1
+            fi
+        else
+            return 1
+        fi
+    fi
+
+    # 更新命令退出 0 后再次 fetch/check，确认本地确实同步到上游。
+    if verify_output="$(_hermes_update_once "$cli" --check)"; then
+        :
+    else
+        rc=$?
+        _hermes_report_failure "Hermes Agent 更新后校验失败" "$rc" "$verify_output"
+        return 1
+    fi
+    if ! printf '%s\n' "$verify_output" | grep -qiE \
+        '(up[ -]?to[ -]?date|already.*latest|no update|0 commit(s)? behind)'; then
+        _hermes_report_failure "Hermes Agent 更新后仍未确认是最新版" 1 "$verify_output"
+        return 1
+    fi
+    hash -r 2>/dev/null || true
+    log "Hermes Agent 已更新且校验通过: $(_hermes_version_line "$cli")"
+}
+
 _install_hermes_via_pip() {
     if [ ! -f "$VENV_DIR/bin/activate" ]; then
         return 1
@@ -344,7 +514,7 @@ _install_hermes_via_pip() {
         log "通过 pip 安装 Hermes Agent（$VENV_DIR）..."
     fi
     pip install -q --upgrade pip "${pip_proxy_args[@]}" 2>/dev/null || true
-    if ! pip install -q "${pip_proxy_args[@]}" hermes-agent; then
+    if ! pip install -q --upgrade "${pip_proxy_args[@]}" hermes-agent; then
         return 1
     fi
     local vbin="$VENV_DIR/bin/hermes"
@@ -352,7 +522,7 @@ _install_hermes_via_pip() {
         mkdir -p "$HOME/.local/bin"
         ln -sf "$vbin" "$HOME/.local/bin/hermes" 2>/dev/null || true
         _ensure_path_local_bin
-        log "Hermes Agent 安装完成: $(_cli_version_line "$vbin" version)"
+        log "Hermes Agent 安装完成: $(_hermes_version_line "$vbin")"
         return 0
     fi
     return 1
@@ -362,15 +532,14 @@ _install_hermes_cli() {
     local cli
     cli="$(_cli_executable hermes)"
     if [ -n "$cli" ]; then
-        if [ "$CLI_UPDATE" = "1" ]; then
-            log "更新 Hermes Agent..."
-            if "$cli" update -y >/dev/null 2>&1; then
-                log "Hermes Agent 已更新: $(_cli_version_line "$cli" version)"
-            else
-                _install_hermes_via_pip || warn "Hermes Agent 自动更新失败，将继续使用当前版本"
-            fi
+        if [ "$HERMES_CLI_UPDATE" = "1" ]; then
+            _hermes_checked_update "$cli" || {
+                err "Hermes Agent 未能更新并验证；为避免继续使用无法确认的旧版本，本次启动已停止。"
+                err "可用 HERMES_CLI_UPDATE=0 临时跳过，或根据上面的原始错误修复网络/Git 后重试。"
+                return 1
+            }
         else
-            log "Hermes Agent 已就绪: $(_cli_version_line "$cli" version)"
+            log "Hermes Agent 已就绪（HERMES_CLI_UPDATE=0，未检查更新）: $(_hermes_version_line "$cli")"
         fi
         return 0
     fi
@@ -408,7 +577,7 @@ _install_hermes_cli() {
     _ensure_path_local_bin
     cli="$(_cli_executable hermes)"
     if [ -n "$cli" ]; then
-        log "Hermes Agent 安装完成: $(_cli_version_line "$cli" version)"
+        log "Hermes Agent 安装完成: $(_hermes_version_line "$cli")"
         unset CURL_PROXY || true
         return 0
     fi
@@ -433,7 +602,9 @@ setup_cli_tools() {
     _ensure_path_local_bin
     log "检查 / 安装 Agent CLI 可执行文件..."
     _install_claude_cli || true
-    _install_hermes_cli || true
+    if ! _install_hermes_cli; then
+        return 1
+    fi
     log "CLI 可执行文件检查完成"
 }
 
@@ -454,6 +625,13 @@ setup_python() {
         pip install -q flask requests
     fi
 
+    # MultiLLM Fusion 的独立窗口使用同一虚拟环境运行 FastAPI bridge，
+    # 避免用户再维护一套隐藏的 Python 环境。
+    if ! python -c "import fastapi, uvicorn, httpx, pydantic, json_repair" >/dev/null 2>&1; then
+        log "安装 MultiLLM Fusion / Desktop Agent 依赖..."
+        pip install -q -r multillm-fusion/requirements.txt
+    fi
+
     # flask-sock：Claude/Hermes 终端 WebSocket 必需（不受 SKIP_OPTIONAL 影响）
     if ! python -c "import flask_sock" >/dev/null 2>&1; then
         log "安装 flask-sock (WebSocket，Claude/Hermes 终端必需)..."
@@ -462,9 +640,9 @@ setup_python() {
 
     # 可选依赖
     if [ "$SKIP_OPTIONAL" != "1" ]; then
-        if ! python -c "import duckduckgo_search" >/dev/null 2>&1; then
-            log "安装可选依赖 duckduckgo-search (联网搜索)..."
-            pip install -q duckduckgo-search || warn "duckduckgo-search 安装失败，/api/web-search 将不可用"
+        if ! python -c "from ddgs import DDGS" >/dev/null 2>&1; then
+            log "安装 DDGS web_search (DuckDuckGo 联网搜索)..."
+            pip install -q --upgrade ddgs || warn "ddgs 安装失败，/api/web-search 将不可用"
         fi
     fi
 }
@@ -537,6 +715,20 @@ clean_all() {
     log "完成"
 }
 
+start_electron() {
+    need npm
+    install_deps
+    build_frontend
+    if [ ! -d node_modules/electron ]; then
+        log "安装 Electron..."
+        npm install --no-fund --no-audit
+    fi
+    log "启动 Electron（将自动拉起后端 PORT=$PORT）..."
+    # 清除 IDE 可能注入的 ELECTRON_RUN_AS_NODE，否则 electron.app 为 undefined
+    env -u ELECTRON_RUN_AS_NODE PORT="$PORT" ELECTRON_START_SERVER=1 \
+      node electron/launch.cjs .
+}
+
 # ---------- 入口 ----------
 parse_args "$@"
 case "$CMD" in
@@ -547,12 +739,13 @@ case "$CMD" in
     deps)           install_deps ;;
     tools)          install_tools ;;
     clean)          clean_all ;;
+    electron)       start_electron ;;
     help|-h|--help)
-        sed -n '2,22p' "$0"
+        sed -n '2,37p' "$0"
         ;;
     *)
         err "未知命令: $CMD"
-        sed -n '2,22p' "$0"
+        sed -n '2,37p' "$0"
         exit 1
         ;;
 esac

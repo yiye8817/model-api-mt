@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import ClaudeChat from './components/ClaudeChat';
@@ -9,10 +9,27 @@ import LocalHubModal from './components/LocalHubModal';
 import SettingsModal from './components/SettingsModal';
 import FileTree from './components/FileTree';
 import FileViewer from './components/FileViewer';
+import WebViewer from './components/WebViewer';
 import WorkbenchPanel from './components/WorkbenchPanel';
 import ClaudeTerminal from './components/ClaudeTerminal';
 import HermesTerminal from './components/HermesTerminal';
+import DesktopAgentPanel from './components/DesktopAgentPanel';
+import CodexTerminalPanel from './components/CodexTerminalPanel';
 import { useBackendState } from './hooks/useBackendState';
+import { hostOfUrl, isLikelyFrameBlocked, normalizeHttpUrl } from './lib/webFrame';
+import { browserFileUrl, fileTargetName, isBrowserOpenableFile, resolveFileTarget } from './lib/fileTargets';
+import { DEFAULT_MODEL_CHAT_SITES } from './lib/modelChatSites';
+import {
+  acquireDesktopOverlay,
+  detectWebChatSite,
+  getDesktop,
+  installDesktopChromeGuard,
+  releaseDesktopOverlay,
+  type WebChatProgressEvent,
+  type WebChatResult,
+  type WebChatTarget,
+  type WebSelectionTranslateEvent,
+} from './lib/desktopBridge';
 import type {
   APIProvider, Conversation, ChatMessage, AppState, FileAttachment, PluginResult,
   PluginProgressEvent, AppSettings, ChatSource, AutoRouteResult, AutoInputRule,
@@ -20,7 +37,7 @@ import type {
 import {
   Loader2, ServerOff, Server, Plus, X as XIcon, Sparkles, MessageSquare,
   FileText, FolderTree, ChevronLeft, PanelRightClose, PanelRightOpen,
-  Terminal as TerminalIcon, ChevronDown, Bot,
+  Terminal as TerminalIcon, ChevronRight, Bot, Globe, Trash2, ExternalLink,
 } from 'lucide-react';
 
 const DEFAULT_STATE: AppState = {
@@ -29,6 +46,28 @@ const DEFAULT_STATE: AppState = {
   activeConversationId: null,
   activeProviderId: null,
 };
+
+type SavedWebPage = {
+  id: string;
+  url: string;
+  title: string;
+  savedAt: number;
+};
+
+const SAVED_WEB_PAGES_KEY = 'workbench/savedWebPages';
+
+function loadSavedWebPages(): SavedWebPage[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SAVED_WEB_PAGES_KEY) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is SavedWebPage => (
+      !!item && typeof item.id === 'string' && typeof item.url === 'string'
+      && typeof item.title === 'string' && typeof item.savedAt === 'number'
+    )).slice(0, 50);
+  } catch {
+    return [];
+  }
+}
 
 export default function App() {
   const [state, setState, loading, backendError] = useBackendState<AppState>(DEFAULT_STATE);
@@ -53,9 +92,19 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const settingsRef = useRef<AppSettings | null>(null);
   settingsRef.current = settings;
+  const [savedWebPages, setSavedWebPages] = useState<SavedWebPage[]>(loadSavedWebPages);
+  useEffect(() => {
+    try { localStorage.setItem(SAVED_WEB_PAGES_KEY, JSON.stringify(savedWebPages)); } catch { /* noop */ }
+  }, [savedWebPages]);
 
   // ===== 中部多 Tab：默认 Claude Code 工作台 + 原有 Provider 对话 + 文件查看 + 交互式终端 =====
-  type CenterTab = { id: string; kind: 'claude' | 'claude-term' | 'hermes' | 'hermes-term' | 'provider' | 'file'; title: string; path?: string };
+  type CenterTab = {
+    id: string;
+    kind: 'claude' | 'claude-term' | 'hermes' | 'hermes-term' | 'desktop-agent' | 'codex-term' | 'provider' | 'file' | 'web';
+    title: string;
+    path?: string;
+    url?: string;
+  };
   const [centerTabs, setCenterTabs] = useState<CenterTab[]>([
     { id: 'claude-1', kind: 'claude', title: 'Claude Code' },
     { id: 'provider', kind: 'provider', title: '对话' },
@@ -68,7 +117,6 @@ export default function App() {
     { available: false, cli: false, ws: false, defaultCwd: '', repoDir: '', version: '' }
   );
   const claudeTabSeq = useRef(1);
-  const fileTabSeq = useRef(0);
 
   // ===== 左侧文件管理器（SP2） & 右侧命令/Skill/自动面板（SP4/5/6）=====
   const [filesPanelOpen, setFilesPanelOpen] = useState(false);
@@ -97,15 +145,83 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem('workbench/autoRules', JSON.stringify(autoRules)); } catch { /* noop */ } }, [autoRules]);
   useEffect(() => { try { localStorage.setItem('workbench/autoRulesEnabled', autoRulesEnabled ? '1' : '0'); } catch { /* noop */ } }, [autoRulesEnabled]);
 
-  const openFileTab = useCallback((path: string, name: string) => {
+  const webTabSeq = useRef(0);
+  const [webSelectionRequest, setWebSelectionRequest] = useState<(WebSelectionTranslateEvent & { nonce: number }) | null>(null);
+  const openWebTab = useCallback((url: string, title?: string) => {
+    const href = normalizeHttpUrl(url);
+    if (!href) return;
+    let tabTitle = title?.trim() || '';
+    if (!tabTitle) tabTitle = hostOfUrl(href) || href;
+    // 普通浏览器无法在 iframe 中显示这些站点，直接交给浏览器新标签页，
+    // 避免同时留下一个无法显示内容的工作台 Tab。Electron 用 WebContentsView。
+    if (!getDesktop() && isLikelyFrameBlocked(href)) {
+      window.open(href, '_blank', 'noopener,noreferrer');
+      return;
+    }
     setCenterTabs(prev => {
-      const existing = prev.find(t => t.kind === 'file' && t.path === path);
+      const existing = prev.find(t => t.kind === 'web' && t.url === href);
       if (existing) { setActiveCenterTab(existing.id); return prev; }
-      fileTabSeq.current += 1;
-      const id = `file-${fileTabSeq.current}`;
+      webTabSeq.current += 1;
+      const id = `web-${webTabSeq.current}`;
       setActiveCenterTab(id);
-      return [...prev, { id, kind: 'file', title: name, path }];
+      return [...prev, { id, kind: 'web', title: tabTitle, url: href }];
     });
+  }, []);
+
+  /**
+   * Open a local target according to its capabilities. Browser-renderable
+   * files use the same web tab as HTTP links; everything else goes straight
+   * to the operating system's default handler.
+   */
+  const openPath = useCallback((path: string, name?: string, cwd?: string) => {
+    const resolved = resolveFileTarget(path, cwd);
+    if (!resolved) return;
+    if (isBrowserOpenableFile(resolved)) {
+      openWebTab(browserFileUrl(resolved), name?.trim() || fileTargetName(resolved));
+      return;
+    }
+    const desktop = getDesktop();
+    if (desktop) {
+      void desktop.openTarget({ target: path, cwd: cwd || undefined }).catch(error => {
+        console.error('无法用默认应用打开路径', path, error);
+      });
+      return;
+    }
+    // A regular browser cannot invoke the host OS file association. Keep the
+    // target out of the workbench tabs and leave the failure visible in devtools.
+    console.warn('当前浏览器无法调用系统默认应用打开路径', path);
+  }, [openWebTab]);
+
+  const openFileTab = useCallback((path: string, name: string) => {
+    openPath(path, name);
+  }, [openPath]);
+
+  const openDesktopAgentPath = useCallback((path: string, cwd?: string) => {
+    openPath(path, undefined, cwd);
+  }, [openPath]);
+
+  const saveWebPage = useCallback((url: string, title?: string) => {
+    const href = normalizeHttpUrl(url);
+    if (!href) return;
+    const requestedTitle = (title || '').trim();
+    const fallbackTitle = hostOfUrl(href) || href;
+    const pageTitle = requestedTitle && !/^浏览器 \d+$/.test(requestedTitle)
+      ? requestedTitle
+      : fallbackTitle;
+    setSavedWebPages(prev => {
+      const existing = prev.find(item => item.url === href);
+      const saved: SavedWebPage = {
+        id: existing?.id || crypto.randomUUID(),
+        url: href,
+        title: pageTitle,
+        savedAt: Date.now(),
+      };
+      return [saved, ...prev.filter(item => item.url !== href)].slice(0, 50);
+    });
+  }, []);
+
+  const deleteSavedWebPage = useCallback((id: string) => {
+    setSavedWebPages(prev => prev.filter(item => item.id !== id));
   }, []);
 
   const handleSessionInfo = useCallback((tid: string, info: { slashCommands: string[]; skills: string[] }) => {
@@ -188,27 +304,129 @@ export default function App() {
     setCenterTabs(prev => [...prev, { id, kind: 'hermes-term', title: `Hermes 终端 ${hermesTermSeq.current}` }]);
     setActiveCenterTab(id);
   }, []);
+
+  const codexTermSeq = useRef(0);
+  const addCodexTermTab = useCallback(() => {
+    codexTermSeq.current += 1;
+    const id = `codex-term-${codexTermSeq.current}`;
+    setCenterTabs(prev => [...prev, { id, kind: 'codex-term', title: `Codex 终端 ${codexTermSeq.current}` }]);
+    setActiveCenterTab(id);
+    setShowAddMenu(false);
+  }, []);
+
+  const addDesktopAgentTab = useCallback(() => {
+    const existing = centerTabs.find(tab => tab.kind === 'desktop-agent');
+    if (existing) {
+      setActiveCenterTab(existing.id);
+      setShowAddMenu(false);
+      return;
+    }
+    const id = 'desktop-agent';
+    setCenterTabs(prev => [...prev, { id, kind: 'desktop-agent', title: 'Desktop Agent' }]);
+    setActiveCenterTab(id);
+    setShowAddMenu(false);
+  }, [centerTabs]);
+
+  const openFusionWindow = useCallback(async () => {
+    const desktop = getDesktop();
+    if (!desktop) {
+      window.alert('Fusion 对话需要 Electron 桌面模式，将在独立窗口中打开。');
+      return;
+    }
+    try {
+      const result = await desktop.openFusion();
+      if (!result.ok) window.alert(result.error || 'Fusion 窗口启动失败');
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const addBtnRef = useRef<HTMLButtonElement>(null);
   const [addMenuPos, setAddMenuPos] = useState<{ left: number; top: number } | null>(null);
   const toggleAddMenu = useCallback(() => {
-    setShowAddMenu(v => {
-      const next = !v;
-      if (next && addBtnRef.current) {
-        const r = addBtnRef.current.getBoundingClientRect();
-        setAddMenuPos({ left: r.left, top: r.bottom + 4 });
-      }
-      return next;
-    });
+    if (showAddMenu) {
+      setShowAddMenu(false);
+      setAddMenuPos(null);
+      return;
+    }
+    const button = addBtnRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    const menuWidth = 208;
+    const menuHeight = 460;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8));
+    const below = rect.bottom + 4;
+    const top = below + menuHeight <= window.innerHeight
+      ? below
+      : Math.max(8, rect.top - menuHeight - 4);
+    setAddMenuPos({ left, top });
+    setShowAddMenu(true);
+  }, [showAddMenu]);
+  const addBrowserTab = useCallback(() => {
+    webTabSeq.current += 1;
+    const id = `web-${webTabSeq.current}`;
+    setCenterTabs(prev => [...prev, {
+      id,
+      kind: 'web',
+      title: `浏览器 ${webTabSeq.current}`,
+      url: 'https://duckduckgo.com',
+    }]);
+    setActiveCenterTab(id);
+    setShowAddMenu(false);
   }, []);
-
   const closeCenterTab = useCallback((id: string) => {
     setCenterTabs(prev => {
+      const closing = prev.find(t => t.id === id);
+      if (closing?.kind === 'web') {
+        void getDesktop()?.closeWeb(id);
+      }
       const next = prev.filter(t => t.id !== id);
       setActiveCenterTab(cur => (cur === id ? (next[next.length - 1]?.id || '') : cur));
       return next;
     });
   }, []);
+
+  // Electron：点击标签栏/侧栏等非网页区时卸下 WebContentsView，避免挡住菜单
+  useEffect(() => installDesktopChromeGuard(), []);
+
+  // 网页内的普通链接、target=_blank 链接都由 Electron 转回 React，
+  // 统一新建工作台网页 Tab。
+  useEffect(() => {
+    const desktop = getDesktop();
+    if (!desktop) return;
+    return desktop.onWebLink(event => {
+      if (event?.url) openWebTab(event.url);
+    });
+  }, [openWebTab]);
+
+  // 网页右键菜单把选中文本交给当前网页助手，用当前 Provider 翻译并显示结果。
+  useEffect(() => {
+    const desktop = getDesktop();
+    if (!desktop) return;
+    return desktop.onWebSelectionTranslate(event => {
+      const text = String(event?.text || '').trim();
+      if (!event?.id || !text) return;
+      setActiveCenterTab(event.id);
+      setWebSelectionRequest({ id: event.id, text, nonce: Date.now() });
+    });
+  }, []);
+
+  // Electron：各类弹层打开期间保持 WebContentsView 隐藏（+ 菜单 / 配置 / 设置等）
+  useEffect(() => {
+    if (!getDesktop()) return;
+    const overlayOpen = showConfigModal || showLocalHub || showSettings || terminalVisible || showAddMenu;
+    if (!overlayOpen) return;
+    acquireDesktopOverlay();
+    return () => releaseDesktopOverlay();
+  }, [showConfigModal, showLocalHub, showSettings, terminalVisible, showAddMenu]);
+
+  // Electron：离开网页标签时卸下 WebContentsView
+  useEffect(() => {
+    const desktop = getDesktop();
+    if (!desktop) return;
+    const tab = centerTabs.find(t => t.id === activeCenterTab);
+    if (tab?.kind !== 'web') void desktop.hideWeb();
+  }, [activeCenterTab, centerTabs]);
 
   // 加载通用设置（model_params + web_search）
   useEffect(() => {
@@ -220,6 +438,28 @@ export default function App() {
 
   const activeConversation = state.conversations.find(c => c.id === state.activeConversationId) || null;
   const activeProvider = state.providers.find(p => p.id === state.activeProviderId) || null;
+  const defaultProvider = state.providers.find(p => p.isDefault) || activeProvider || state.providers[0] || null;
+  const webChatTargets: WebChatTarget[] = useMemo(() => centerTabs.flatMap(tab => {
+    if (tab.kind !== 'web' || !tab.url) return [];
+    const site = detectWebChatSite(tab.url);
+    return site ? [{ id: tab.id, title: tab.title, url: tab.url, site }] : [];
+  }), [centerTabs]);
+  const configuredWebChatAggregator = useMemo(() => {
+    const binding = settings?.model_roles?.chat_basic;
+    if (!binding?.providerId || !binding.model) return null;
+    const boundProvider = state.providers.find(provider => provider.id === binding.providerId);
+    return boundProvider ? { ...boundProvider, selectedModel: binding.model } : null;
+  }, [settings?.model_roles?.chat_basic, state.providers]);
+  const webChatAggregator = configuredWebChatAggregator || activeProvider;
+  const webChatAggregatorInfo = webChatAggregator ? {
+    providerName: webChatAggregator.name,
+    model: webChatAggregator.selectedModel,
+    usesBasicModel: !!configuredWebChatAggregator,
+  } : null;
+  const webChatSelectionRef = useRef<{ enabled: boolean; ids: string[] }>({ enabled: false, ids: [] });
+  const handleWebChatSelectionChange = useCallback((enabled: boolean, ids: string[]) => {
+    webChatSelectionRef.current = { enabled, ids };
+  }, []);
   const activeProviderRef = useRef(activeProvider);
   activeProviderRef.current = activeProvider;
   const stateRef = useRef(state);
@@ -243,9 +483,12 @@ export default function App() {
     setState(prev => {
       const existing = prev.providers.findIndex(p => p.id === provider.id);
       const providers = existing >= 0
-        ? prev.providers.map(p => p.id === provider.id ? provider : p)
+        ? prev.providers.map(p => p.id === provider.id ? provider : (provider.isDefault ? { ...p, isDefault: false } : p))
         : [...prev.providers, provider];
-      return { ...prev, providers, activeProviderId: provider.id };
+      const normalized = providers.some(p => p.isDefault)
+        ? providers
+        : providers.map((p, index) => ({ ...p, isDefault: index === 0 }));
+      return { ...prev, providers: normalized, activeProviderId: provider.id };
     });
     setShowConfigModal(false);
     setEditingProvider(null);
@@ -293,10 +536,10 @@ export default function App() {
     } catch (e: any) {
       warn = e?.message || '无法连接 LLM 服务';
     }
-    const provider: APIProvider = { id, name, baseUrl, apiKey: '', models, selectedModel };
+    const provider: APIProvider = { id, name, baseUrl, apiKey: '', models, selectedModel, isDefault: state.providers.length === 0 };
     setState(prev => ({ ...prev, providers: [...prev.providers, provider], activeProviderId: id }));
     if (warn) console.warn('[Local LLM]', warn);
-  }, [setState]);
+  }, [setState, state.providers.length]);
 
   const handleSelectModel = useCallback((providerId: string, model: string) => {
     setState(prev => ({
@@ -309,8 +552,27 @@ export default function App() {
 
   // Conversation management
   const handleNewConversation = useCallback(() => {
-    if (!state.activeProviderId) return;
-    const provider = state.providers.find(p => p.id === state.activeProviderId);
+    const webSelection = webChatSelectionRef.current;
+    const desktop = getDesktop();
+    if (webSelection.enabled && webSelection.ids.length > 0 && desktop?.newWebChat) {
+      void Promise.all(webSelection.ids.map(id => desktop.newWebChat(id))).then(results => {
+        const nextUrls = new Map<string, string>();
+        results.forEach((result, index) => {
+          const id = webSelection.ids[index];
+          if (!result.ok) console.warn('网页 AI 新建对话失败', id, result.error);
+          else if (result.url) nextUrls.set(id, result.url);
+        });
+        if (nextUrls.size > 0) {
+          setCenterTabs(previous => previous.map(tab => {
+            const nextUrl = nextUrls.get(tab.id);
+            return nextUrl ? { ...tab, url: nextUrl } : tab;
+          }));
+        }
+      }).catch(error => console.warn('网页 AI 新建对话失败', error));
+    }
+    const provider = state.providers.find(p => p.isDefault)
+      || state.providers.find(p => p.id === state.activeProviderId)
+      || state.providers[0];
     if (!provider) return;
 
     const newConv: Conversation = {
@@ -327,6 +589,7 @@ export default function App() {
       ...prev,
       conversations: [newConv, ...prev.conversations],
       activeConversationId: newConv.id,
+      activeProviderId: provider.id,
     }));
   }, [state.activeProviderId, state.providers, setState]);
 
@@ -369,7 +632,7 @@ export default function App() {
 
 
   // Chat
-  const handleSendMessage = useCallback(async (content: string, attachments?: FileAttachment[], options?: { webSearch?: boolean }) => {
+  const handleSendMessage = useCallback(async (content: string, attachments?: FileAttachment[], options?: { webSearch?: boolean; webChatTargets?: string[] }) => {
     if (!activeConversation || !activeProvider) return;
 
     // ---------- 自动路由：意图分析 + 上下文话题判定 + 角色路由 ----------
@@ -378,9 +641,14 @@ export default function App() {
     let autoRouteInfo: ChatMessage['autoRoute'] | undefined;
     let autoRouteData: AutoRouteResult | undefined;
     const sendOptions: { webSearch?: boolean } = { ...(options || {}) };
+    const desktopForWebChat = getDesktop();
+    const selectedWebChatTargets = (options?.webChatTargets || [])
+      .map(id => webChatTargets.find(target => target.id === id))
+      .filter((target): target is WebChatTarget => !!target);
+    const webChatMode = !!desktopForWebChat && selectedWebChatTargets.length > 0 && !!content.trim();
     let createdNewConv = false;
 
-    if (autoRouteEnabled && content.trim()) {
+    if (autoRouteEnabled && content.trim() && !webChatMode) {
       try {
         const recent = activeConversation.messages.slice(-6).map(m => ({
           role: m.role,
@@ -498,8 +766,247 @@ export default function App() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     let aborted = false;
+    let inlineAssistantId: string | null = null;
 
     try {
+      // ---------- 网页 AI 群聊：并行询问已打开网页 → 基本对话模型综合 ----------
+      if (webChatMode && desktopForWebChat) {
+        const assistantId = crypto.randomUUID();
+        inlineAssistantId = assistantId;
+        const aggregationProvider = webChatAggregator || effectiveProvider;
+        const aggregator = {
+          providerName: aggregationProvider.name,
+          model: aggregationProvider.selectedModel,
+          usesBasicModel: !!configuredWebChatAggregator,
+        };
+        const siteLabels: Record<string, string> = {
+          deepseek: 'DeepSeek', qwen: 'Qwen', chatgpt: 'ChatGPT', claude: 'Claude',
+          gemini: 'Gemini', grok: 'Grok', poe: 'Poe', generic: '网页 AI',
+        };
+        type WebChatState = {
+          state: 'waiting' | 'done' | 'error';
+          result?: WebChatResult;
+          events: WebChatProgressEvent[];
+        };
+        const progress = new Map<string, WebChatState>(
+          selectedWebChatTargets.map(target => [target.id, { state: 'waiting', events: [] }]),
+        );
+        const targetLabel = (target: WebChatTarget, result?: WebChatResult) =>
+          siteLabels[result?.site || target.site] || target.title || target.site;
+        const structuredAnswers = () => selectedWebChatTargets.map(target => {
+          const item = progress.get(target.id);
+          const result = item?.result;
+          return {
+            tabId: target.id,
+            title: targetLabel(target, result),
+            site: result?.site || target.site,
+            model: result?.model,
+            url: result?.url || target.url,
+            content: result?.content,
+            error: result?.error,
+            warning: result?.warning,
+            partial: result?.partial,
+            durationMs: result?.durationMs,
+            dumpPath: result?.dumpPath,
+            pagePath: result?.pagePath,
+            pageSaveError: result?.pageSaveError,
+            events: item?.events || result?.progressEvents || [],
+            extraction: result?.extraction,
+            validation: result?.validation,
+            status: item?.state || 'waiting',
+          } as const;
+        });
+        const progressMarkdown = () => [
+          '🌐 **网页 AI 群聊进行中**',
+          '',
+          `综合模型：**${aggregator.providerName} / ${aggregator.model}**（${aggregator.usesBasicModel ? '基本对话模型' : '当前选择模型'}）`,
+          '',
+          ...selectedWebChatTargets.map(target => {
+            const item = progress.get(target.id);
+            const label = targetLabel(target, item?.result);
+            if (item?.state === 'done') return `- ✅ ${label}：已收到回答`;
+            if (item?.state === 'error') return `- ❌ ${label}：${item.result?.error || '请求失败'}`;
+            const latestEvent = item?.events[item.events.length - 1];
+            return `- ⏳ ${label}：${latestEvent?.message || '正在回答…'}`;
+          }),
+        ].join('\n');
+        const placeholder: ChatMessage = {
+          id: assistantId,
+          role: 'assistant',
+          content: progressMarkdown(),
+          timestamp: Date.now(),
+          providerId: aggregationProvider.id,
+          model: aggregationProvider.selectedModel,
+          webChat: { status: 'running', aggregator, answers: structuredAnswers() },
+        };
+        setState(prev => ({
+          ...prev,
+          conversations: prev.conversations.map(c =>
+            c.id === effectiveConversation.id
+              ? { ...c, messages: [...c.messages, placeholder], updatedAt: Date.now() }
+              : c
+          ),
+        }));
+        const updateWebAssistant = (patch: Partial<ChatMessage>) => {
+          if (controller.signal.aborted) return;
+          setState(prev => ({
+            ...prev,
+            conversations: prev.conversations.map(c => c.id !== effectiveConversation.id ? c : {
+              ...c,
+              messages: c.messages.map(m => m.id === assistantId ? { ...m, ...patch } : m),
+              updatedAt: Date.now(),
+            }),
+          }));
+        };
+
+        if (typeof desktopForWebChat.webChat !== 'function') {
+          throw new Error('桌面桥接尚未加载网页群聊功能，请完全退出并重新启动桌面应用');
+        }
+
+        let removeWebChatProgress: (() => void) | undefined;
+        if (typeof desktopForWebChat.onWebChatProgress === 'function') {
+          removeWebChatProgress = desktopForWebChat.onWebChatProgress(event => {
+            const current = progress.get(event.id);
+            if (!current) return;
+            progress.set(event.id, {
+              ...current,
+              events: [...current.events, event].slice(-50),
+            });
+            updateWebAssistant({
+              content: progressMarkdown(),
+              timestamp: Date.now(),
+              webChat: { status: 'running', aggregator, answers: structuredAnswers() },
+            });
+          });
+        }
+        const cleanupWebChatProgress = () => {
+          removeWebChatProgress?.();
+          removeWebChatProgress = undefined;
+        };
+        controller.signal.addEventListener('abort', cleanupWebChatProgress, { once: true });
+
+        const allWebChats = Promise.all(selectedWebChatTargets.map(async target => {
+          let result: WebChatResult;
+          try {
+            result = await desktopForWebChat.webChat(target.id, content.trim(), 300000);
+          } catch (error: any) {
+            result = { ok: false, error: error?.message || String(error) };
+          }
+          const current = progress.get(target.id);
+          const combinedEvents = [...(current?.events || []), ...(result.progressEvents || [])];
+          const seenEvents = new Set<string>();
+          const events = combinedEvents.filter(event => {
+            const key = `${event.timestamp}:${event.event}:${event.message}`;
+            if (seenEvents.has(key)) return false;
+            seenEvents.add(key);
+            return true;
+          }).slice(-50);
+          progress.set(target.id, { state: result.ok ? 'done' : 'error', result, events });
+          updateWebAssistant({
+            content: progressMarkdown(),
+            timestamp: Date.now(),
+            webChat: { status: 'running', aggregator, answers: structuredAnswers() },
+          });
+          return { target, result };
+        }));
+        let rejectOnAbort: (() => void) | null = null;
+        const abortedRequest = new Promise<never>((_resolve, reject) => {
+          rejectOnAbort = () => reject(new DOMException('Aborted', 'AbortError'));
+          controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+        });
+        const collected = await Promise.race([allWebChats, abortedRequest]);
+        cleanupWebChatProgress();
+        controller.signal.removeEventListener('abort', cleanupWebChatProgress);
+        if (rejectOnAbort) controller.signal.removeEventListener('abort', rejectOnAbort);
+
+        const successes = collected.filter(item => item.result.ok && item.result.content);
+        const failures = collected.filter(item => !item.result.ok);
+        const failureSummary = failures.length
+          ? '\n\n未完成：' + failures.map(({ target, result }) =>
+              `${targetLabel(target, result)}（${result.error || '请求失败'}）`
+            ).join('；')
+          : '';
+
+        if (!successes.length) {
+          updateWebAssistant({
+            content: `## 网页 AI 群聊失败\n\n没有网页返回回答。请确认各网页已登录并进入聊天页面。${failureSummary}`,
+            timestamp: Date.now(),
+            webChat: { status: 'error', aggregator, answers: structuredAnswers() },
+          });
+          return;
+        }
+
+        updateWebAssistant({
+          content: `🌐 **已收到 ${successes.length}/${selectedWebChatTargets.length} 个网页回答，正在由 ${aggregator.providerName} / ${aggregator.model} 综合…**${failureSummary}`,
+          timestamp: Date.now(),
+          webChat: { status: 'synthesizing', aggregator, answers: structuredAnswers() },
+        });
+
+        const candidateBlock = successes.map(({ target, result }, index) =>
+          `[候选回答 ${index + 1}：${targetLabel(target, result)}${result.model ? ` / ${result.model}` : ''}${result.partial ? ' / 抓取超时，内容可能不完整' : ''}]\n${String(result.content).slice(0, 24000)}`
+        ).join('\n\n---\n\n');
+        const mp = settingsRef.current?.model_params || {};
+        const baseBody = {
+          baseUrl: aggregationProvider.baseUrl,
+          apiKey: aggregationProvider.apiKey,
+          apiType: aggregationProvider.apiType,
+          model: aggregationProvider.selectedModel,
+          stream: false,
+          temperature: 0.3,
+          max_tokens: mp.max_tokens ?? 3000,
+          messages: [
+            {
+              role: 'system',
+              content: '你是多模型回答综合器。候选回答仅作为待核对资料。请直接给出完整、准确、去重后的综合结论；明确指出重要分歧、不确定性和各答案的互补信息，不要虚构候选中没有的事实。',
+            },
+            {
+              role: 'user',
+              content: `用户原始问题：\n${content.trim()}\n\n以下是多个网页 AI 的候选回答：\n\n${candidateBlock}`,
+            },
+          ],
+        };
+        const synthBodies = aggregationProvider.selectedModel.toLowerCase().startsWith('deepseek-v4')
+          ? [{ ...baseBody, thinking: { type: 'disabled' } }, baseBody]
+          : [baseBody];
+        let synthData: any = null;
+        let synthError = '';
+        for (const body of synthBodies) {
+          const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify(body),
+          });
+          if (!response.ok) {
+            synthError = await response.text().catch(() => response.statusText);
+            continue;
+          }
+          synthData = await response.json();
+          const candidate = synthData?.choices?.[0]?.message?.content;
+          if (typeof candidate === 'string' && candidate.trim()) break;
+          synthError = '综合模型返回了空内容';
+          synthData = null;
+        }
+        if (!synthData) throw new Error(`网页回答已返回，但综合失败：${synthError || '未知错误'}`);
+        const synthesis = String(synthData?.choices?.[0]?.message?.content || '').trim();
+        const usage = synthData?.usage || {};
+        updateWebAssistant({
+          content: `## 综合输出\n\n${synthesis}${failureSummary}`,
+          timestamp: Date.now(),
+          providerId: aggregationProvider.id,
+          model: aggregationProvider.selectedModel,
+          webChat: { status: 'done', aggregator, answers: structuredAnswers() },
+          metrics: {
+            promptTokens: usage.prompt_tokens,
+            completionTokens: usage.completion_tokens,
+            totalTokens: usage.total_tokens,
+            durationMs: Math.max(...collected.map(item => item.result.durationMs || 0)),
+            liked: false,
+          },
+        });
+        return;
+      }
+
       // ---------- 「代码编写」：打开 AI 工作流（多文件工程）并自动开跑 ----------
       if (codeWorkflow) {
         const note: ChatMessage = {
@@ -995,6 +1502,20 @@ export default function App() {
               model: effectiveProvider.selectedModel,
               autoRoute: autoRouteInfo,
             };
+            if (inlineAssistantId) {
+              return {
+                ...c,
+                messages: c.messages.map(m => m.id === inlineAssistantId
+                  ? {
+                    ...m,
+                    content: `${m.content}\n\n---\n\n⏹️ _网页群聊已停止_`,
+                    timestamp: Date.now(),
+                    webChat: m.webChat ? { ...m.webChat, status: 'stopped' } : undefined,
+                  }
+                  : m),
+                updatedAt: Date.now(),
+              };
+            }
             return { ...c, messages: [...c.messages, stoppedMsg], updatedAt: Date.now() };
           }),
         }));
@@ -1009,11 +1530,24 @@ export default function App() {
 
         setState(prev => ({
           ...prev,
-          conversations: prev.conversations.map(c =>
-            c.id === effectiveConversation.id
-              ? { ...c, messages: [...c.messages, errorMsg], updatedAt: Date.now() }
-              : c
-          ),
+          conversations: prev.conversations.map(c => {
+            if (c.id !== effectiveConversation.id) return c;
+            if (inlineAssistantId) {
+              return {
+                ...c,
+                messages: c.messages.map(m => m.id === inlineAssistantId
+                  ? {
+                    ...m,
+                    content: `${m.content}\n\n---\n\n❌ **网页群聊失败**：${err.message}`,
+                    timestamp: Date.now(),
+                    webChat: m.webChat ? { ...m.webChat, status: 'error' } : undefined,
+                  }
+                  : m),
+                updatedAt: Date.now(),
+              };
+            }
+            return { ...c, messages: [...c.messages, errorMsg], updatedAt: Date.now() };
+          }),
         }));
       }
     } finally {
@@ -1023,7 +1557,7 @@ export default function App() {
       setIsLoading(false);
       setStreamingContent('');
     }
-  }, [activeConversation, activeProvider, pluginEnabled, autoRouteEnabled, setState]);
+  }, [activeConversation, activeProvider, pluginEnabled, autoRouteEnabled, setState, webChatTargets, webChatAggregator, configuredWebChatAggregator]);
 
   const handlePluginRun = useCallback((convId: string, messageId: string, pluginName: string) => {
     const p = activeProviderRef.current;
@@ -1226,7 +1760,7 @@ export default function App() {
       const res = await fetch('/api/models', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl: p.baseUrl, apiKey: p.apiKey }),
+        body: JSON.stringify({ baseUrl: p.baseUrl, apiKey: p.apiKey, apiType: p.apiType }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1351,12 +1885,20 @@ export default function App() {
 
   const activeCenterTabMeta = centerTabs.find(t => t.id === activeCenterTab);
   const fileManagerDir = (() => {
-    const agentKinds = ['claude', 'claude-term', 'hermes', 'hermes-term'] as const;
-    if (activeCenterTabMeta && agentKinds.includes(activeCenterTabMeta.kind as typeof agentKinds[number])) {
+    const workdirKinds = ['claude', 'claude-term', 'hermes', 'hermes-term', 'desktop-agent', 'codex-term'] as const;
+    if (activeCenterTabMeta && workdirKinds.includes(activeCenterTabMeta.kind as typeof workdirKinds[number])) {
       const cwd = claudeCwds[activeCenterTabMeta.id];
       if (cwd) return cwd;
+      if (activeCenterTabMeta.kind === 'desktop-agent' || activeCenterTabMeta.kind === 'codex-term') {
+        return claudeMeta.defaultCwd || hermesMeta.defaultCwd || '';
+      }
     }
-    const anyAgent = centerTabs.find(t => agentKinds.includes(t.kind as typeof agentKinds[number]) && claudeCwds[t.id]);
+    if (activeCenterTabMeta?.kind === 'file' && activeCenterTabMeta.path) {
+      const path = activeCenterTabMeta.path.replace(/[\\/]$/, '');
+      const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+      if (separator > 0) return path.slice(0, separator);
+    }
+    const anyAgent = centerTabs.find(t => workdirKinds.includes(t.kind as typeof workdirKinds[number]) && claudeCwds[t.id]);
     if (anyAgent) return claudeCwds[anyAgent.id];
     return hermesMeta.repoDir || hermesMeta.defaultCwd || claudeMeta.repoDir || claudeMeta.defaultCwd || '';
   })();
@@ -1415,6 +1957,7 @@ export default function App() {
           onRefreshProviderModels={handleRefreshProviderModels}
           onAddLocalProvider={handleAddLocalProvider}
           onOpenLocalHub={() => setShowLocalHub(true)}
+          onOpenProviderSource={(url, name) => openWebTab(url, name)}
         />
 
         {/* 左侧文件管理器（SP2，可折叠） */}
@@ -1446,17 +1989,17 @@ export default function App() {
           </div>
         )}
 
-        <div className="flex-1 min-w-0 flex flex-col">
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
           {/* 中部 Tab 栏 */}
           <div className="shrink-0 flex items-center gap-1 bg-gray-900 border-b border-gray-700 px-2 h-9 overflow-x-auto">
             {centerTabs.map(tab => {
               const isActive = tab.id === activeCenterTab;
-              const closable = tab.kind === 'claude' || tab.kind === 'claude-term' || tab.kind === 'hermes' || tab.kind === 'hermes-term' || tab.kind === 'file';
+              const closable = tab.kind === 'claude' || tab.kind === 'claude-term' || tab.kind === 'hermes' || tab.kind === 'hermes-term' || tab.kind === 'desktop-agent' || tab.kind === 'codex-term' || tab.kind === 'file' || tab.kind === 'web';
               return (
                 <div
                   key={tab.id}
                   onClick={() => setActiveCenterTab(tab.id)}
-                  title={tab.path || tab.title}
+                  title={tab.url || tab.path || tab.title}
                   className={`group flex items-center gap-1.5 px-3 h-7 rounded-t cursor-pointer text-xs shrink-0 border-b-2 ${
                     isActive ? 'bg-gray-850 text-white border-purple-500' : 'text-gray-400 border-transparent hover:text-gray-200 hover:bg-gray-800'
                   }`}
@@ -1465,13 +2008,16 @@ export default function App() {
                     : tab.kind === 'claude-term' ? <TerminalIcon size={12} className="text-purple-300 shrink-0" />
                     : tab.kind === 'hermes' ? <Bot size={12} className="text-amber-400 shrink-0" />
                     : tab.kind === 'hermes-term' ? <TerminalIcon size={12} className="text-amber-300 shrink-0" />
+                    : tab.kind === 'desktop-agent' ? <Bot size={12} className="text-amber-300 shrink-0" />
+                    : tab.kind === 'codex-term' ? <TerminalIcon size={12} className="text-cyan-300 shrink-0" />
                     : tab.kind === 'file' ? <FileText size={12} className="text-sky-400 shrink-0" />
+                    : tab.kind === 'web' ? <Globe size={12} className="text-amber-400 shrink-0" />
                     : <MessageSquare size={12} className="shrink-0" />}
                   <span className="whitespace-nowrap max-w-[160px] truncate">{tab.title}</span>
                   {closable && (
                     <button
                       onClick={(e) => { e.stopPropagation(); closeCenterTab(tab.id); }}
-                      className="opacity-0 group-hover:opacity-100 hover:text-red-400 rounded"
+                      className="opacity-60 group-hover:opacity-100 hover:text-red-400 rounded focus:opacity-100"
                       title="关闭"
                     >
                       <XIcon size={11} />
@@ -1480,19 +2026,38 @@ export default function App() {
                 </div>
               );
             })}
-            <button
-              ref={addBtnRef}
-              onClick={toggleAddMenu}
-              onBlur={() => setTimeout(() => setShowAddMenu(false), 150)}
-              className="ml-1 flex items-center p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 shrink-0"
-              title="新建标签页"
-            >
-              <Plus size={14} />
-              <ChevronDown size={11} className="-ml-0.5" />
-            </button>
+            <div className="ml-1 flex items-center shrink-0">
+              <button
+                ref={addBtnRef}
+                onClick={toggleAddMenu}
+                className="p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800"
+                title="新建标签"
+                aria-label="新建标签"
+                aria-expanded={showAddMenu}
+              >
+                <Plus size={14} />
+              </button>
+              <button
+                onClick={() => void openFusionWindow()}
+                className="ml-1 p-1 rounded text-gray-500 hover:text-purple-300 hover:bg-gray-800"
+                title="打开独立 Fusion 融合对话窗口"
+                aria-label="打开独立 Fusion 融合对话窗口"
+              >
+                <ExternalLink size={13} />
+              </button>
+            </div>
             <div className="ml-auto flex items-center gap-1 shrink-0">
               <button
-                onClick={() => setFilesPanelOpen(v => !v)}
+                onClick={() => {
+                  setFilesPanelOpen(current => {
+                    const next = !current;
+                    if (next && fileManagerDir) {
+                      setFilesPanelCwd(fileManagerDir);
+                      setFilesPanelNav({ dir: fileManagerDir, nonce: Date.now() });
+                    }
+                    return next;
+                  });
+                }}
                 className={`p-1 rounded hover:bg-gray-800 ${filesPanelOpen ? 'text-sky-400' : 'text-gray-400 hover:text-white'}`}
                 title={filesPanelOpen ? '隐藏文件管理器' : '显示文件管理器'}
               >
@@ -1536,6 +2101,11 @@ export default function App() {
                 onAutoRouteEnabledChange={setAutoRouteEnabled}
                 agentRequest={agentRequest}
                 onAgentRequestConsumed={() => setAgentRequest(null)}
+                webChatTargets={webChatTargets}
+                webChatAggregator={webChatAggregatorInfo}
+                onWebChatSelectionChange={handleWebChatSelectionChange}
+                onOpenWebChatSite={openWebTab}
+                onOpenUrl={openWebTab}
               />
             </div>
 
@@ -1547,6 +2117,7 @@ export default function App() {
                     active={activeCenterTab === tab.id}
                     defaultCwd={claudeMeta.defaultCwd}
                     repoDir={claudeMeta.repoDir}
+                    onOpenUrl={openWebTab}
                     tabId={tab.id}
                     onSessionInfo={handleSessionInfo}
                     onCwdChange={handleClaudeCwdChange}
@@ -1584,6 +2155,7 @@ export default function App() {
                     autoRulesEnabled={autoRulesEnabled}
                     onRuleConsumed={handleRuleConsumed}
                     provider={activeProviderPayload}
+                    onOpenUrl={openWebTab}
                   />
                 ) : (
                   <div className="h-full flex flex-col items-center justify-center text-gray-400 text-sm gap-2 p-8 text-center">
@@ -1606,7 +2178,30 @@ export default function App() {
             {/* 文件查看标签页（SP3） */}
             {centerTabs.filter(t => t.kind === 'file').map(tab => (
               <div key={tab.id} className={`absolute inset-0 ${activeCenterTab === tab.id ? '' : 'hidden'}`}>
-                <FileViewer path={tab.path || ''} active={activeCenterTab === tab.id} />
+                <FileViewer path={tab.path || ''} active={activeCenterTab === tab.id} onOpenUrl={openWebTab} />
+              </div>
+            ))}
+
+            {/* Provider 来源等内嵌网页标签页 */}
+            {centerTabs.filter(t => t.kind === 'web').map(tab => (
+              <div key={tab.id} className={`absolute inset-0 ${activeCenterTab === tab.id ? '' : 'hidden'}`}>
+                <WebViewer
+                  tabId={tab.id}
+                  url={tab.url || ''}
+                  title={tab.title}
+                  active={activeCenterTab === tab.id}
+                  selectionRequest={webSelectionRequest?.id === tab.id ? webSelectionRequest : null}
+                  onTitleChange={(title) => setCenterTabs(previous => previous.map(item =>
+                    item.id === tab.id && title.trim() ? { ...item, title: title.trim() } : item
+                  ))}
+                  onOpenUrl={openWebTab}
+                  providers={state.providers}
+                  defaultProviderId={activeProvider?.id || null}
+                  onSavePage={saveWebPage}
+                  onUrlChange={(url) => setCenterTabs(previous => previous.map(item =>
+                    item.id === tab.id ? { ...item, url } : item
+                  ))}
+                />
               </div>
             ))}
 
@@ -1614,10 +2209,12 @@ export default function App() {
             {centerTabs.filter(t => t.kind === 'claude-term').map(tab => (
               <div key={tab.id} className={`absolute inset-0 ${activeCenterTab === tab.id ? '' : 'hidden'}`}>
                 {claudeMeta.available ? (
-                  <ClaudeTerminal
+                    <ClaudeTerminal
                     active={activeCenterTab === tab.id}
                     defaultCwd={claudeMeta.defaultCwd}
                     repoDir={claudeMeta.repoDir}
+                    onOpenUrl={openWebTab}
+                    onOpenPath={openDesktopAgentPath}
                     tabId={tab.id}
                     onCwdChange={handleClaudeCwdChange}
                     injected={termInject && termInject.tabId === tab.id ? termInject : null}
@@ -1657,6 +2254,8 @@ export default function App() {
                     active={activeCenterTab === tab.id}
                     defaultCwd={hermesMeta.defaultCwd}
                     repoDir={hermesMeta.repoDir}
+                    onOpenUrl={openWebTab}
+                    onOpenPath={openDesktopAgentPath}
                     tabId={tab.id}
                     onCwdChange={handleClaudeCwdChange}
                     injected={hermesTermInject && hermesTermInject.tabId === tab.id ? hermesTermInject : null}
@@ -1678,6 +2277,26 @@ export default function App() {
                     )}
                   </div>
                 )}
+              </div>
+            ))}
+
+            {/* Desktop Agent 标签页：控制台本身留在 React 工作台，实际 Agent
+                进程由 Electron 在独立终端启动。 */}
+            {centerTabs.filter(t => t.kind === 'desktop-agent').map(tab => (
+              <div key={tab.id} className={`absolute inset-0 ${activeCenterTab === tab.id ? '' : 'hidden'}`}>
+                <DesktopAgentPanel onOpenPath={openDesktopAgentPath} onOpenUrl={openWebTab} defaultProvider={defaultProvider} />
+              </div>
+            ))}
+
+            {centerTabs.filter(t => t.kind === 'codex-term').map(tab => (
+              <div key={tab.id} className={`absolute inset-0 ${activeCenterTab === tab.id ? '' : 'hidden'}`}>
+                <CodexTerminalPanel
+                  tabId={tab.id}
+                  defaultCwd={claudeMeta.defaultCwd || hermesMeta.defaultCwd || ''}
+                  onCwdChange={handleClaudeCwdChange}
+                  onOpenPath={openDesktopAgentPath}
+                  onOpenUrl={openWebTab}
+                />
               </div>
             ))}
           </div>
@@ -1707,6 +2326,96 @@ export default function App() {
           className="fixed w-52 bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-[60] py-1 text-xs"
           style={{ left: addMenuPos.left, top: addMenuPos.top }}
         >
+          <div className="relative group">
+          <button
+            onMouseDown={(e) => { e.preventDefault(); addBrowserTab(); }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-gray-200 hover:bg-gray-700"
+            >
+              <Globe size={13} className="text-amber-400" />
+              <span className="flex-1">浏览器网页</span>
+              <ChevronRight size={12} className="text-gray-500" />
+            </button>
+            <div className="invisible opacity-0 group-hover:visible group-hover:opacity-100 absolute left-full top-0 w-72 max-h-[70vh] overflow-y-auto bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 transition-opacity">
+              <button
+                onMouseDown={(e) => { e.preventDefault(); addBrowserTab(); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left text-gray-200 hover:bg-gray-700"
+              >
+                <Plus size={13} className="text-amber-400" /> 新建浏览器网页
+              </button>
+              <div className="my-1 border-t border-gray-700" />
+              <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">
+                常用模型聊天网页（默认地址）
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {DEFAULT_MODEL_CHAT_SITES.map(site => (
+                  <button
+                    key={site.id}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      openWebTab(site.url, site.name);
+                      setShowAddMenu(false);
+                    }}
+                    className="w-full px-3 py-2 text-left hover:bg-gray-700"
+                    title={site.url}
+                  >
+                    <div className="truncate text-gray-200">{site.name}</div>
+                    <div className="truncate text-[10px] font-mono text-gray-500">{site.url}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="my-1 border-t border-gray-700" />
+              <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">
+                已保存网页（{savedWebPages.length}）
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {savedWebPages.length === 0 ? (
+                  <div className="px-3 py-3 text-xs text-gray-500">暂无保存网页</div>
+                ) : savedWebPages.map(page => (
+                  <div key={page.id} className="flex items-center hover:bg-gray-700">
+                    <button
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        openWebTab(page.url, page.title);
+                        setShowAddMenu(false);
+                      }}
+                      className="flex-1 min-w-0 px-3 py-2 text-left"
+                      title={page.url}
+                    >
+                      <div className="truncate text-gray-200">{page.title}</div>
+                      <div className="truncate text-[10px] font-mono text-gray-500">{page.url}</div>
+                    </button>
+                    <button
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        deleteSavedWebPage(page.id);
+                      }}
+                      className="mr-2 p-1.5 rounded text-gray-500 hover:text-red-400 hover:bg-gray-800"
+                      title="删除保存状态"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="my-1 border-t border-gray-700" />
+          <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">MultiLLM Fusion</div>
+          <button
+            onMouseDown={(e) => { e.preventDefault(); addDesktopAgentTab(); }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-gray-200 hover:bg-gray-700"
+          >
+            <Bot size={13} className="text-amber-300" /> Desktop Agent（标签页）
+          </button>
+          <button
+            onMouseDown={(e) => { e.preventDefault(); void openFusionWindow(); setShowAddMenu(false); }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-gray-200 hover:bg-gray-700"
+            title="仅以独立 Electron 窗口打开"
+          >
+            <ExternalLink size={13} className="text-purple-300" /> 融合对话（独立窗口）
+          </button>
+          <div className="my-1 border-t border-gray-700" />
           <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">Claude Code</div>
           <button
             onMouseDown={(e) => { e.preventDefault(); addClaudeTab(); setShowAddMenu(false); }}
@@ -1734,11 +2443,19 @@ export default function App() {
           >
             <TerminalIcon size={13} className="text-amber-300" /> 交互式终端
           </button>
+          <div className="my-1 border-t border-gray-700" />
+          <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">Codex</div>
+          <button
+            onMouseDown={(e) => { e.preventDefault(); addCodexTermTab(); }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-gray-200 hover:bg-gray-700"
+          >
+            <TerminalIcon size={13} className="text-cyan-300" /> Codex 虚拟终端
+          </button>
         </div>
       )}
 
       {/* Terminal Panel（支持多标签，每个标签独立 shell） */}
-      <TerminalDock visible={terminalVisible} onClose={() => setTerminalVisible(false)} onSendToChat={(text) => setInjectedForInput({ content: text })} />
+      <TerminalDock visible={terminalVisible} onClose={() => setTerminalVisible(false)} onSendToChat={(text) => setInjectedForInput({ content: text })} onOpenPath={openDesktopAgentPath} onOpenUrl={openWebTab} />
 
       {showConfigModal && (
         <ConfigModal

@@ -3,16 +3,22 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron": "node electron/launch.cjs .",
+    "electron:dev": "ELECTRON_START_SERVER=1 node electron/launch.cjs .",
+    "test:web-chat": "node electron/launch.cjs electron/web-chat.test.cjs"
   },
   "dependencies": {
     "clsx": "2.1.1",
+    "dompurify": "^3.4.15",
     "highlight.js": "^11.11.1",
     "katex": "^0.17.0",
     "lucide-react": "^0.577.0",
+    "marked": "^18.0.13",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-markdown": "^10.1.0",
@@ -21,6 +27,9 @@
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "tailwind-merge": "3.4.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
+    "ws": "^8.21.3",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0"
   },
@@ -30,6 +39,7 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
+    "electron": "^37.10.3",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.2.4",

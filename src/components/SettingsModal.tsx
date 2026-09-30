@@ -820,7 +820,7 @@ function EndpointRow({
           type="password"
           value={binding.apiKey}
           onChange={e => onChange({ apiKey: e.target.value })}
-          placeholder="sk-..."
+          placeholder="输入 API Key（格式不限）"
           className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs font-mono"
         />
       </div>

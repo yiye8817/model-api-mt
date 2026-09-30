@@ -10,6 +10,8 @@ export interface APIProvider {
   supportsVision?: boolean;
   /** 接口对接方式，缺省按 'openai' 处理。 */
   apiType?: ApiType;
+  /** Default provider used by new conversations and terminal context actions. */
+  isDefault?: boolean;
   models: string[];
   selectedModel: string;
 }
@@ -124,6 +126,57 @@ export interface ChatSource {
   fetched_title?: string;
 }
 
+export interface WebChatProgressEvent {
+  id: string;
+  event: string;
+  message: string;
+  timestamp: number;
+  details?: Record<string, unknown>;
+}
+
+export interface WebChatAnswer {
+  tabId: string;
+  title: string;
+  site: string;
+  model?: string;
+  url: string;
+  content?: string;
+  error?: string;
+  warning?: string;
+  partial?: boolean;
+  durationMs?: number;
+  dumpPath?: string;
+  pagePath?: string;
+  pageSaveError?: string;
+  events?: WebChatProgressEvent[];
+  extraction?: {
+    ok: boolean;
+    source: 'copy-button' | 'dom';
+    copiedChars: number;
+    buttonLabel?: string;
+    error?: string;
+  };
+  validation?: {
+    complete: boolean;
+    selectedChars: number;
+    dumpMaxCandidateChars: number;
+    busyAfterDump: boolean;
+    copiedMarkdown: boolean;
+    reason: string;
+  };
+  status: 'waiting' | 'done' | 'error';
+}
+
+export interface WebChatMessageState {
+  status: 'running' | 'synthesizing' | 'done' | 'error' | 'stopped';
+  aggregator: {
+    providerName: string;
+    model: string;
+    usesBasicModel: boolean;
+  };
+  answers: WebChatAnswer[];
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
@@ -138,6 +191,8 @@ export interface ChatMessage {
   metrics?: MessageMetrics;
   /** 联网搜索时的引用列表，渲染在消息底部。 */
   sources?: ChatSource[];
+  /** 网页 AI 群聊的结构化过程与原始回答。 */
+  webChat?: WebChatMessageState;
   /** 自动路由命中时附带的意图信息，展示在消息头部。 */
   autoRoute?: {
     intent: string;

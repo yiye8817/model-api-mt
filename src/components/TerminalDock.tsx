@@ -1,14 +1,16 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Terminal as TerminalIcon, X, Plus, Maximize2, Trash2, MessageCircle, ChevronUp, Minus } from 'lucide-react';
+import { Terminal as TerminalIcon, X, Plus, Maximize2, Trash2, MessageCircle, ChevronUp, Minus, Copy, ClipboardPaste } from 'lucide-react';
 import TerminalSession, { type TerminalSessionHandle } from './TerminalSession';
 
 interface Props {
   visible: boolean;
   onClose: () => void;
   onSendToChat?: (text: string) => void;
+  onOpenPath?: (path: string, cwd?: string) => void;
+  onOpenUrl?: (url: string, title?: string) => void;
 }
 
-interface TermTab { id: string; title: string }
+interface TermTab { id: string; title: string; initialCwd?: string | null }
 
 const HEIGHT_KEY = 'terminalDock/height';
 const MINIMIZED_KEY = 'terminalDock/minimized';
@@ -27,13 +29,14 @@ function readMinimized(): boolean {
   try { return localStorage.getItem(MINIMIZED_KEY) === '1'; } catch { return false; }
 }
 
-export default function TerminalDock({ visible, onClose, onSendToChat }: Props) {
+export default function TerminalDock({ visible, onClose, onSendToChat, onOpenPath, onOpenUrl }: Props) {
   const [wsAvailable, setWsAvailable] = useState<boolean | null>(null);
   const [tabs, setTabs] = useState<TermTab[]>([{ id: 'term-1', title: '终端 1' }]);
   const [activeId, setActiveId] = useState('term-1');
   const [maximized, setMaximized] = useState(false);
   const [minimized, setMinimized] = useState(readMinimized);
   const [height, setHeight] = useState(readHeight);
+  const [addingTab, setAddingTab] = useState(false);
   const seqRef = useRef(1);
   const handlesRef = useRef<Map<string, TerminalSessionHandle>>(new Map());
   const lastSelectionRef = useRef<string | null>(null);
@@ -66,13 +69,23 @@ export default function TerminalDock({ visible, onClose, onSendToChat }: Props) 
     fitActive();
   }, [visible, minimized, maximized, height, fitActive]);
 
-  const addTab = useCallback(() => {
+  const addTab = useCallback(async () => {
+    if (addingTab) return;
+    setAddingTab(true);
+    const sourceId = activeId;
+    let initialCwd: string | null = null;
+    try {
+      initialCwd = await handlesRef.current.get(sourceId)?.getCwd() || null;
+    } catch {
+      initialCwd = null;
+    }
     seqRef.current += 1;
     const id = `term-${seqRef.current}`;
-    setTabs(prev => [...prev, { id, title: `终端 ${seqRef.current}` }]);
+    setTabs(prev => [...prev, { id, title: `终端 ${seqRef.current}`, initialCwd }]);
     setActiveId(id);
     if (minimized) setMinimized(false);
-  }, [minimized]);
+    setAddingTab(false);
+  }, [activeId, addingTab, minimized]);
 
   const closeTab = useCallback((id: string) => {
     setTabs(prev => {
@@ -186,7 +199,7 @@ export default function TerminalDock({ visible, onClose, onSendToChat }: Props) 
               </button>
             </div>
           ))}
-          <button onClick={addTab} className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-white shrink-0" title="新建终端">
+          <button onClick={() => void addTab()} disabled={addingTab} className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-white shrink-0 disabled:opacity-50" title={addingTab ? '正在读取当前终端目录…' : '新建终端'}>
             <Plus size={14} />
           </button>
         </div>
@@ -200,6 +213,27 @@ export default function TerminalDock({ visible, onClose, onSendToChat }: Props) 
             >
               <MessageCircle size={13} />
             </button>
+          )}
+          {!minimized && (
+            <>
+              <button
+                onMouseDown={e => { lastSelectionRef.current = window.getSelection()?.toString().trim() || null; e.preventDefault(); }}
+                onClick={() => { void handlesRef.current.get(activeId)?.copySelection(lastSelectionRef.current); lastSelectionRef.current = null; }}
+                className="p-1.5 hover:bg-gray-800 rounded text-gray-500 hover:text-white"
+                title="复制选中内容"
+                aria-label="复制选中内容"
+              >
+                <Copy size={13} />
+              </button>
+              <button
+                onClick={() => { void handlesRef.current.get(activeId)?.pasteClipboard(); }}
+                className="p-1.5 hover:bg-gray-800 rounded text-gray-500 hover:text-white"
+                title="粘贴剪贴板内容"
+                aria-label="粘贴剪贴板内容"
+              >
+                <ClipboardPaste size={13} />
+              </button>
+            </>
           )}
           {!minimized && (
             <button onClick={() => handlesRef.current.get(activeId)?.clear()} className="p-1.5 hover:bg-gray-800 rounded text-gray-500 hover:text-white" title="清空当前终端">
@@ -230,7 +264,10 @@ export default function TerminalDock({ visible, onClose, onSendToChat }: Props) 
               ref={(h) => { if (h) handlesRef.current.set(t.id, h); else handlesRef.current.delete(t.id); }}
               active={activeId === t.id}
               wsAvailable={wsAvailable}
+              initialCwd={t.initialCwd || undefined}
               onSendToChat={onSendToChat}
+              onOpenPath={onOpenPath}
+              onOpenUrl={onOpenUrl}
             />
           </div>
         ))}
