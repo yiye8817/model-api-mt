@@ -3,7 +3,7 @@
  * Provider 来源等网页用 WebContentsView 顶层加载（不受 iframe XFO 限制）。
  */
 const electron = require('electron');
-const { app, BrowserWindow, WebContentsView, session, ipcMain, shell, Menu } = electron;
+const { app, BrowserWindow, WebContentsView, session, ipcMain, shell, Menu, clipboard } = electron;
 const path = require('path');
 const os = require('os');
 const { fileURLToPath } = require('url');
@@ -11,7 +11,9 @@ const fs = require('fs');
 const http = require('http');
 const { spawn } = require('child_process');
 const { runWebChat, startNewWebChat, copyLatestAnswerMarkdown, detectSite } = require('./web-chat.cjs');
-const { buildProjectPrompt, wizardScript, runWebProject } = require('./web-project.cjs');
+const {
+  buildProjectPrompt, wizardScript, runWebProject, extractMarkdownCodeBlocks,
+} = require('./web-project.cjs');
 
 if (!app) {
   console.error(
@@ -855,6 +857,36 @@ function registerIpc() {
       webProjectJobs.get(requestId)?.abort();
       return { ok: true, stopped: true };
     }
+    if (action === 'list-clipboard-blocks') {
+      let markdown = '';
+      try { markdown = clipboard?.readText?.() || ''; } catch (error) {
+        return { ok: false, error: `读取系统剪贴板失败：${String(error?.message || error)}` };
+      }
+      if (!markdown.trim()) return { ok: false, error: '系统剪贴板为空，请先在网页中点击回答的复制按钮。' };
+      const blocks = extractMarkdownCodeBlocks(markdown);
+      return { ok: true, chars: markdown.length, blocks };
+    }
+    if (action === 'run-block' || action === 'save-block') {
+      const code = typeof payload.code === 'string' ? payload.code : '';
+      const language = String(payload.language || '').trim().toLowerCase();
+      if (!code.trim()) return { ok: false, error: '代码块内容为空' };
+      if (!language) return { ok: false, error: '代码块语言无法识别，请在 Markdown 围栏中标注语言。' };
+      try {
+        const endpoint = action === 'save-block' ? '/api/save-code' : '/api/run-code';
+        const body = action === 'save-block'
+          ? { content: code, language }
+          : { code, language, timeoutSeconds: 120 };
+        const response = await postJsonToBackend(endpoint, body);
+        const result = response.body && typeof response.body === 'object' ? response.body : {};
+        return {
+          ...result,
+          ok: response.statusCode >= 200 && response.statusCode < 300,
+          statusCode: response.statusCode,
+        };
+      } catch (error) {
+        return { ok: false, error: String(error?.message || error || '代码块执行失败') };
+      }
+    }
     const controller = new AbortController();
     webProjectJobs.set(requestId, controller);
     const report = (name, message, details = {}) => {
@@ -888,9 +920,20 @@ function registerIpc() {
           signal: controller.signal,
           onProgress: (eventName, message, details) => report(eventName, message, details),
         }),
-        copy: async () => copyLatestAnswerMarkdown(
-          pageEntry.view, detectSite(pageEntry.view.webContents.getURL() || ''), report,
-        ),
+        copy: async () => {
+          if (action === 'save-clipboard') {
+            let content = '';
+            try { content = clipboard?.readText?.() || ''; } catch (error) {
+              return { ok: false, error: `读取系统剪贴板失败：${String(error?.message || error)}` };
+            }
+            return content.trim()
+              ? { ok: true, content, source: 'manual-clipboard' }
+              : { ok: false, error: '系统剪贴板为空，请先在网页中点击回答的复制按钮。' };
+          }
+          return copyLatestAnswerMarkdown(
+            pageEntry.view.webContents, detectSite(pageEntry.view.webContents.getURL() || ''), report,
+          );
+        },
         importMarkdown: async (markdown, slug) => {
           const response = await postJsonToBackend('/api/markdown-project', { markdown, goal, slug });
           const body = response.body && typeof response.body === 'object' ? response.body : {};
@@ -902,7 +945,14 @@ function registerIpc() {
           return { ...body, ok: response.statusCode >= 200 && response.statusCode < 300 };
         },
       };
-      return await runWebProject({ ...payload, goal, action: action === 'save-current' ? 'save-current' : 'generate' }, services);
+      const workflowAction = action === 'save-current' || action === 'save-clipboard'
+        ? 'save-current' : 'generate';
+      return await runWebProject({
+        ...payload,
+        goal,
+        action: workflowAction,
+        manualClipboard: action === 'save-clipboard',
+      }, services);
     } catch (error) {
       return { ok: false, error: String(error?.message || error || '网页项目流程失败') };
     } finally {

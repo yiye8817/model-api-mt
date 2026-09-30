@@ -16,6 +16,53 @@ function buildProjectPrompt(goal, language, environment) {
   ].join('\n');
 }
 
+function extractMarkdownCodeBlocks(markdown) {
+  const aliases = {
+    python: 'python', py: 'python', python3: 'python',
+    javascript: 'javascript', js: 'javascript', node: 'javascript',
+    typescript: 'javascript', ts: 'javascript',
+    bash: 'bash', sh: 'bash', shell: 'bash', zsh: 'bash',
+    c: 'c', cpp: 'cpp', 'c++': 'cpp', cxx: 'cpp',
+    java: 'java', go: 'go', golang: 'go', rust: 'rust', rs: 'rust',
+    ruby: 'ruby', rb: 'ruby', php: 'php', html: 'html', htm: 'html',
+  };
+  const infer = code => {
+    if (/^#!.*\bpython(?:3)?\b/m.test(code) || /^(?:from\s+\w[\w.]*\s+import|import\s+\w)/m.test(code) || /\bdef\s+\w+\s*\([^)]*\)\s*:/m.test(code)) return 'python';
+    if (/^#!.*\b(?:ba)?sh\b/m.test(code) || /\b(?:echo|printf)\s+.+\n/.test(code)) return 'bash';
+    if (/\b(?:console\.log|const|let|var)\s+/.test(code)) return 'javascript';
+    if (/<(?:!doctype\s+html|html|head|body)\b/i.test(code)) return 'html';
+    if (/^\s*#include\s*[<"](?:iostream|vector|string|cstdio|cstdlib)/m.test(code)) return 'cpp';
+    if (/^\s*#include\s*[<"](?:stdio|stdlib|string)\.h[>]/m.test(code)) return 'c';
+    if (/\bpublic\s+(?:final\s+|abstract\s+)?class\s+[A-Z]\w*/.test(code) && /\bstatic\s+void\s+main\s*\(/.test(code)) return 'java';
+    if (/^\s*package\s+main\b/m.test(code) && /\bfunc\s+main\s*\(/.test(code)) return 'go';
+    if (/\bfn\s+main\s*\(/.test(code) && /(?:println!|use\s+[A-Za-z_])/.test(code)) return 'rust';
+    return '';
+  };
+  const source = String(markdown || '');
+  const fence = /```[ \t]*([^\n`]*)\n([\s\S]*?)```/g;
+  const blocks = [];
+  let match;
+  while ((match = fence.exec(source))) {
+    const info = String(match[1] || '').trim();
+    const content = String(match[2] || '').replace(/\n$/, '');
+    const tokens = info.split(/\s+/).filter(Boolean);
+    const raw = String(tokens[0] || '').toLowerCase().replace(/^language-/, '');
+    if (raw === 'workbench-project' || raw === 'project-config' || raw === 'json') continue;
+    const language = aliases[raw] || infer(content);
+    if (!language || !content.trim()) continue;
+    const path = tokens.slice(1).find(token => /[./\\]/.test(token)) || '';
+    blocks.push({
+      index: blocks.length + 1,
+      language,
+      code: content,
+      info,
+      path,
+      label: path ? `${language} · ${path}` : `${language} · 代码块 ${blocks.length + 1}`,
+    });
+  }
+  return blocks;
+}
+
 /** Runs in the native page. A shadow root keeps wizard inputs out of chat selectors. */
 function installProjectWizardInPage() {
   const existing = document.getElementById('workbench-project-wizard');
@@ -55,7 +102,13 @@ function installProjectWizardInPage() {
         <div class="actions"><button data-build>生成提示词</button></div>
         <label>发送给当前网页模型的提示词（可修改）</label><textarea data-prompt rows="5"></textarea>
         <label><input type="checkbox" data-autofix checked> 失败后回发给当前网页模型修复，最多 3 次</label>
-        <div class="actions"><button class="primary" data-send>发送到当前网页并运行</button><button data-save>保存当前回答并运行</button><button data-stop disabled>停止</button></div>
+        <div class="actions"><button class="primary" data-send>发送到当前网页并运行</button><button data-save>自动复制当前回答并运行</button><button data-manual>读取剪贴板并运行</button><button data-stop disabled>停止</button></div>
+        <p>也可以先在网页回答上手动点击“复制”，再点“读取剪贴板并运行”。</p>
+        <div data-block-tools>
+          <label>从剪贴板提取代码块（可选择单个代码块执行）</label>
+          <div class="actions"><button data-list-blocks>提取代码块</button><select data-block-select disabled><option>请先提取代码块</option></select><button data-run-block disabled>运行所选</button><button data-save-block disabled>保存所选</button></div>
+          <pre data-block-output hidden></pre>
+        </div>
         <p>生成时自动折叠窗口，网页仍可滚动和输入。运行发生在这台计算机的项目目录中。</p>
         <div data-result></div><pre data-log hidden></pre>
       </div>
@@ -65,12 +118,23 @@ function installProjectWizardInPage() {
   const body = find('[data-body]');
   const status = find('[data-status]');
   const log = find('[data-log]');
+  const blockSelect = find('[data-block-select]');
+  const blockOutput = find('[data-block-output]');
+  let blocks = [];
   let requestId = '';
   let busy = false;
   const setBusy = value => {
     busy = value;
-    ['[data-send]', '[data-save]', '[data-build]'].forEach(selector => { find(selector).disabled = value; });
+    ['[data-send]', '[data-save]', '[data-manual]', '[data-build]', '[data-list-blocks]'].forEach(selector => { find(selector).disabled = value; });
     find('[data-stop]').disabled = !value;
+    if (value) {
+      find('[data-run-block]').disabled = true;
+      find('[data-save-block]').disabled = true;
+    } else {
+      const hasBlock = !!blocks[Number(blockSelect.value)];
+      find('[data-run-block]').disabled = !hasBlock;
+      find('[data-save-block]').disabled = !hasBlock;
+    }
   };
   // The same template is used by the main process when an empty prompt is submitted.
   const build = () => {
@@ -84,6 +148,57 @@ function installProjectWizardInPage() {
   find('[data-collapse]').onclick = () => { body.hidden = !body.hidden; };
   find('[data-close]').onclick = () => { host.style.display = 'none'; };
   find('[data-stop]').onclick = () => { void bridge.project({ action: 'stop', requestId }); };
+  const showBlockOutput = (value, ok = true) => {
+    blockOutput.hidden = false;
+    blockOutput.style.color = ok ? '#a7f3d0' : '#fecdd3';
+    blockOutput.textContent = String(value || (ok ? '执行成功（无输出）' : '执行失败'));
+  };
+  const refreshBlocks = async () => {
+    blockOutput.hidden = false;
+    blockOutput.textContent = '正在读取系统剪贴板…';
+    const result = await bridge.project({ action: 'list-clipboard-blocks' });
+    if (!result.ok) {
+      blocks = [];
+      blockSelect.replaceChildren(new Option(result.error || '没有找到代码块', ''));
+      blockSelect.disabled = true;
+      find('[data-run-block]').disabled = true;
+      find('[data-save-block]').disabled = true;
+      showBlockOutput(result.error, false);
+      return;
+    }
+    blocks = Array.isArray(result.blocks) ? result.blocks : [];
+    blockSelect.replaceChildren(...blocks.map((block, index) => new Option(block.label, String(index))));
+    blockSelect.disabled = blocks.length === 0;
+    find('[data-run-block]').disabled = blocks.length === 0;
+    find('[data-save-block]').disabled = blocks.length === 0;
+    showBlockOutput(blocks.length ? `已提取 ${blocks.length} 个代码块，请选择一个执行。` : '剪贴板中没有识别到可执行代码块。', !!blocks.length);
+  };
+  blockSelect.onchange = () => {
+    const block = blocks[Number(blockSelect.value)];
+    if (block) showBlockOutput(`${block.label}\n\n${block.code}`);
+  };
+  const runSelectedBlock = async action => {
+    const block = blocks[Number(blockSelect.value)];
+    if (!block) return;
+    find('[data-run-block]').disabled = true;
+    find('[data-save-block]').disabled = true;
+    showBlockOutput(action === 'run-block' ? '正在本地执行所选代码块…' : '正在保存所选代码块…');
+    try {
+      const result = await bridge.project({ action, code: block.code, language: block.language });
+      const output = result.output || result.error || (result.file && (result.file.path || result.file.name)) || '';
+      showBlockOutput(output, result.ok !== false && (!result.exit_code || result.exit_code === 0));
+    } catch (error) {
+      showBlockOutput(String(error?.message || error), false);
+    } finally {
+      if (!busy) {
+        find('[data-run-block]').disabled = false;
+        find('[data-save-block]').disabled = false;
+      }
+    }
+  };
+  find('[data-list-blocks]').onclick = () => { void refreshBlocks(); };
+  find('[data-run-block]').onclick = () => { void runSelectedBlock('run-block'); };
+  find('[data-save-block]').onclick = () => { void runSelectedBlock('save-block'); };
   let drag = null;
   const header = find('header');
   header.addEventListener('pointerdown', event => {
@@ -113,7 +228,8 @@ function installProjectWizardInPage() {
     requestId = 'project-' + Date.now() + '-' + Math.random().toString(36).slice(2);
     setBusy(true);
     body.hidden = true;
-    status.textContent = action === 'generate' ? '正在发送到当前网页模型…' : '正在点击当前回答的复制按钮…';
+    status.textContent = action === 'generate' ? '正在发送到当前网页模型…'
+      : (action === 'save-clipboard' ? '正在读取手动复制的网页回答…' : '正在点击当前回答的复制按钮…');
     log.textContent = '';
     find('[data-result]').replaceChildren();
     try {
@@ -155,6 +271,7 @@ function installProjectWizardInPage() {
   };
   find('[data-send]').onclick = () => { void start('generate'); };
   find('[data-save]').onclick = () => { void start('save-current'); };
+  find('[data-manual]').onclick = () => { void start('save-clipboard'); };
   return { ok: true };
 }
 
@@ -176,7 +293,9 @@ async function runWebProject(options, services) {
   for (let attempt = 0; attempt <= maxFixes; attempt++) {
     check();
     if (options.action === 'save-current' && attempt === 0) {
-      report('copying', '正在点击网页回答的复制按钮，取得 Markdown');
+      report('copying', options.manualClipboard
+        ? '正在读取已手动复制的网页回答，取得 Markdown'
+        : '正在点击网页回答的复制按钮，取得 Markdown');
       const copied = await copy();
       if (!copied.ok || !copied.content) throw new Error(copied.error || '网页回答复制失败');
       markdown = copied.content;
@@ -227,4 +346,6 @@ async function runWebProject(options, services) {
   };
 }
 
-module.exports = { buildProjectPrompt, wizardScript, runWebProject };
+module.exports = {
+  buildProjectPrompt, extractMarkdownCodeBlocks, wizardScript, runWebProject,
+};

@@ -822,9 +822,17 @@ function clickPreparedCopyButtonInPage(marker) {
 }
 
 async function copyLatestAnswerMarkdown(webContents, site, onProgress) {
+  // Callers may hold either a WebContentsView or its webContents. Normalize
+  // here so a view cannot produce the misleading "executeJavaScript is not a
+  // function" error during manual project imports.
+  webContents = webContents?.webContents || webContents;
   const report = (event, message, details = {}) => {
     try { onProgress?.(event, message, details); } catch { /* progress must not break extraction */ }
   };
+  if (!webContents || typeof webContents.executeJavaScript !== 'function') {
+    report('copy-failed', '网页复制桥不可用');
+    return { ok: false, error: '网页复制桥不可用，请重启桌面应用后重试' };
+  }
   if (!systemClipboard) {
     report('copy-failed', '系统剪贴板不可用');
     return { ok: false, error: 'Electron 剪贴板不可用' };
