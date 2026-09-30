@@ -7,6 +7,7 @@ import 'katex/dist/katex.min.css';
 import { Copy, Check, Download, Play, Eye, Loader2, Lock, MessageSquare, Sparkles } from 'lucide-react';
 import { registerTerminalLinkProvider, terminalLinkHandler } from '../lib/terminalLinks';
 import { getDesktop } from '../lib/desktopBridge';
+import type { APIProvider } from '../types';
 
 /**
  * 把大模型输出里的 LaTeX 定界符规整为 remark-math 能识别的 `$`/`$$`。
@@ -43,8 +44,17 @@ const RUNNABLE_LANG_ALIASES: Record<string, string> = {
   python: 'python', py: 'python', python3: 'python',
   javascript: 'javascript', js: 'javascript', node: 'javascript',
   bash: 'bash', sh: 'bash', shell: 'bash', zsh: 'bash',
+  c: 'c',
+  cpp: 'cpp', 'c++': 'cpp', cxx: 'cpp', 'c-plus-plus': 'cpp',
+  java: 'java',
+  go: 'go', golang: 'go',
+  rust: 'rust', rs: 'rust',
+  ruby: 'ruby', rb: 'ruby',
+  php: 'php',
+  html: 'html', htm: 'html',
 };
-const RUNNABLE_LANGS = Object.values(RUNNABLE_LANG_ALIASES);
+const RUNNABLE_LANGS = [...new Set(Object.values(RUNNABLE_LANG_ALIASES))];
+const COMPILED_LANGS = new Set(['c', 'cpp', 'java', 'go', 'rust']);
 
 function normalizeCodeLanguage(value: string): string {
   const normalized = String(value || '').trim().toLowerCase().replace(/^language-/, '');
@@ -65,6 +75,10 @@ function inferCodeLanguage(source: string): string {
   ) return 'python';
   if (/^#!.*\b(?:ba)?sh\b/m.test(code) || /\b(?:echo|printf)\s+.+\n/.test(code) && /\$[A-Za-z_{]/.test(code)) return 'bash';
   if (/\b(?:console\.log|const|let|var)\s+/.test(code)) return 'javascript';
+  if (/<(?:!doctype\s+html|html|head|body)\b/i.test(code)) return 'html';
+  if (/^\s*#include\s*[<"](?:iostream|vector|string|cstdio|cstdlib)/m.test(code)) return 'cpp';
+  if (/^\s*#include\s*[<"](?:stdio|stdlib|string)\.h[>"]/m.test(code)) return 'c';
+  if (/\bpublic\s+(?:final\s+|abstract\s+)?class\s+[A-Z]\w*/.test(code) && /\bstatic\s+void\s+main\s*\(/.test(code)) return 'java';
   return '';
 }
 
@@ -85,7 +99,7 @@ function setSudoPasswordToCache(password: string): void {
   } catch {}
 }
 
-function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuoteToInputAndSend, onOpenUrl, ...props }: any) {
+function CodeBlock({ className, children, inline, __block, provider, onQuoteToInput, onQuoteToInputAndSend, onOpenUrl, ...props }: any) {
   const [copied, setCopied] = useState(false);
   const [runResult, setRunResult] = useState<RunResult>({ status: 'idle', output: '' });
   const [showPreview, setShowPreview] = useState(false);
@@ -119,11 +133,22 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
   const [rememberSudoInTerminal, setRememberSudoInTerminal] = useState(true);
   /** 创建终端前需先输入 sudo 密码（未命中缓存时） */
   const [showSudoDialogForTerminal, setShowSudoDialogForTerminal] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [repairInfo, setRepairInfo] = useState('');
 
-  const code = String(children).replace(/\n$/, '');
+  const rawCode = String(children).replace(/\n$/, '');
   const rawLang = /language-([\w.+-]+)/i.exec(className || '')?.[1] || '';
-  const isInline = inline === true || (!__block && !className && !code.includes('\n'));
-  const lang = normalizeCodeLanguage(rawLang) || (!isInline ? inferCodeLanguage(code) : '');
+  const isInline = inline === true || (!__block && !className && !rawCode.includes('\n'));
+  const initialLang = normalizeCodeLanguage(rawLang) || (!isInline ? inferCodeLanguage(rawCode) : '');
+  const [workingCode, setWorkingCode] = useState(rawCode);
+  const [workingLang, setWorkingLang] = useState(initialLang);
+  useEffect(() => {
+    setWorkingCode(rawCode);
+    setWorkingLang(initialLang);
+    setRepairInfo('');
+  }, [initialLang, rawCode]);
+  const code = workingCode;
+  const lang = workingLang;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code);
@@ -445,7 +470,81 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
     setWsRunNonce(n => n + 1);
   }, [code]);
 
+  const handleCompile = useCallback(async () => {
+    setRunResult({ status: 'running', output: '' });
+    try {
+      await handleSave();
+      const response = await fetch('/api/run-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, language: lang, compileOnly: true, timeoutSeconds: 120 }),
+      });
+      const data = await response.json().catch(() => ({}));
+      const output = data.output || data.error || '(编译完成，无输出)';
+      setRunResult({
+        status: response.ok && data.exit_code === 0 ? 'success' : 'error',
+        output,
+        errorReason: response.ok && data.exit_code === 0 ? undefined : (data.error || '编译失败'),
+      });
+    } catch (error: any) {
+      setRunResult({ status: 'error', output: error?.message || '编译失败', errorReason: error?.message || '编译失败' });
+    }
+  }, [code, handleSave, lang]);
+
+  const handleAiRepair = useCallback(async (failureOutput?: string, failureExitCode?: number) => {
+    const repairOutput = failureOutput || runResult.errorReason || runResult.output || '未捕获到错误输出';
+    const repairExitCode = failureExitCode ?? (runResult.status === 'error' ? 1 : 0);
+    if (!provider) {
+      onQuoteToInputAndSend?.(
+        `以下 ${lang || 'text'} 代码执行失败，请重写完整代码并给出依赖安装命令。\n\n` +
+        `原始代码：\n\`\`\`${lang || ''}\n${code}\n\`\`\`\n\n错误输出：\n\`\`\`\n${repairOutput}\n\`\`\``
+      );
+      return;
+    }
+    setRepairing(true);
+    setRepairInfo('正在让模型分析错误并重写代码…');
+    try {
+      const response = await fetch('/api/agent/fix-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code,
+          language: lang,
+          output: repairOutput,
+          exitCode: repairExitCode,
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey,
+          model: provider.selectedModel,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.error || `AI 修复失败 (${response.status})`);
+      const fixed = String(data?.code || '').trim();
+      if (!fixed) throw new Error('模型没有返回可替换代码');
+      setWorkingCode(fixed);
+      setWorkingLang(normalizeCodeLanguage(String(data?.language || lang)) || lang);
+      setSavedPath('');
+      setSaveInfo(null);
+      const deps = Array.isArray(data?.dependencies) ? data.dependencies.filter(Boolean).join(', ') : '';
+      const commands = Array.isArray(data?.install_commands) ? data.install_commands.filter(Boolean).join(' && ') : '';
+      setRepairInfo(`${data?.summary || '模型已重写代码'}${deps ? `；依赖：${deps}` : ''}${commands ? `；安装：${commands}` : ''}`);
+      setRunResult({ status: 'idle', output: '' });
+    } catch (error: any) {
+      setRepairInfo(error?.message || 'AI 修复失败');
+    } finally {
+      setRepairing(false);
+    }
+  }, [code, lang, onQuoteToInputAndSend, provider, runResult.errorReason, runResult.output, runResult.status]);
+
   const handleRun = useCallback(async () => {
+    // Every first run persists the source and the generated runner in the
+    // workspace so the result can be inspected or compiled manually later.
+    if (!savedPath && !saveInfo) await handleSave();
+    if (lang === 'html') {
+      setShowPreview(true);
+      setRunResult({ status: 'success', output: 'HTML 文件已保存，并已在下方预览中打开。' });
+      return;
+    }
     // 任何可运行脚本中含 `sudo` 调用，都尝试自动注入缓存密码（python/js 也可能 os.system('sudo ...')）
     const needsSudo = RUNNABLE_LANGS.includes(lang) && /\bsudo\b/.test(code);
     const cachedPwd = getSudoPasswordFromCache();
@@ -485,10 +584,11 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
       return;
     }
     await doRun();
-  }, [lang, code, doRun, startWsRun]);
+  }, [lang, code, doRun, handleSave, savedPath, saveInfo, startWsRun]);
 
   const isHtml = lang === 'html' || (!lang && code.trim().startsWith('<'));
   const isRunnable = RUNNABLE_LANGS.includes(lang);
+  const isCompiled = COMPILED_LANGS.has(lang);
 
   // Inline code
   if (isInline) {
@@ -526,6 +626,17 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
                 Run
               </button>
           )}
+          {isCompiled && (
+            <button
+              onClick={handleCompile}
+              disabled={runResult.status === 'running'}
+              className="flex items-center gap-1 hover:text-cyan-300 transition-colors px-2 py-1 rounded hover:bg-gray-700 disabled:opacity-50"
+              title="只编译，不运行"
+            >
+              {runResult.status === 'running' ? <Loader2 size={14} className="animate-spin" /> : <span className="font-mono text-[11px]">C</span>}
+              编译
+            </button>
+          )}
           {isHtml && (
             <button
               onClick={() => setShowPreview(!showPreview)}
@@ -538,6 +649,11 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
           )}
         </div>
       </div>
+      {repairInfo && (
+        <div className="border-t border-cyan-700/40 bg-cyan-950/20 px-4 py-2 text-xs text-cyan-200 whitespace-pre-wrap">
+          {repairInfo}
+        </div>
+      )}
       {saveInfo && (
         <div className="border-t border-gray-700 bg-gray-850 px-4 py-2 text-xs space-y-1">
           <div className="text-green-400">✓ 已保存：<span className="font-mono text-gray-200">{saveInfo.file}</span></div>
@@ -566,7 +682,7 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
       )}
       <pre className="overflow-x-auto p-4 bg-gray-900 text-sm">
         <code className={`${className} text-gray-200`} {...props}>
-          {children}
+          {code}
         </code>
       </pre>
 
@@ -585,25 +701,29 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
               : `✗ 执行失败 (exit ${wsExecStatus.exitCode})`}
             <div className="ml-auto flex items-center gap-1">
               {/* 失败时：让 AI 分析修复 */}
-              {wsExecStatus.done && wsExecStatus.exitCode !== 0 && onQuoteToInputAndSend && (
+              {wsExecStatus.done && wsExecStatus.exitCode !== 0 && (onQuoteToInputAndSend || provider) && (
                 <button
                   type="button"
-                  disabled={wsAiAsked}
+                  disabled={wsAiAsked || repairing}
                   onClick={() => {
                     setWsAiAsked(true);
+                    if (provider) {
+                      void handleAiRepair(wsExecStatus.errorOutput, wsExecStatus.exitCode);
+                      return;
+                    }
                     const errBlock = (wsExecStatus.errorOutput || '').trim() || '(no output captured)';
                     const langTag = lang || 'bash';
                     const msg =
-                      `以下 ${langTag} 脚本在终端执行失败（exit code ${wsExecStatus.exitCode}），请帮我分析失败原因并给出修复方案。\n\n` +
+                      `以下 ${langTag} 代码在编译/执行时失败（exit code ${wsExecStatus.exitCode}），请直接重写为可运行的完整代码，分析错误原因，并列出需要安装的依赖及安装命令。\n\n` +
                       `**原始脚本：**\n\`\`\`${langTag}\n${code}\n\`\`\`\n\n` +
                       `**终端输出（含错误）：**\n\`\`\`\n${errBlock}\n\`\`\``;
                     onQuoteToInputAndSend(msg);
                   }}
                   className="flex items-center gap-1 px-2 py-0.5 rounded bg-red-600/20 text-red-200 hover:bg-red-600/40 border border-red-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="把代码与错误输出发给 AI 询问修复方案"
+                  title="把代码与错误交给大模型重写，并给出依赖安装命令"
                 >
                   <Sparkles size={12} />
-                  {wsAiAsked ? '已提交' : '让 AI 修复'}
+                  {repairing ? '修复中…' : wsAiAsked ? '已提交' : 'AI 修复并安装依赖'}
                 </button>
               )}
               {/* 引用终端中选中的文本到输入框（不发送） */}
@@ -701,6 +821,29 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
               >
                 <MessageSquare size={12} />
                 引用到输入
+              </button>
+            )}
+            {runResult.status === 'error' && (onQuoteToInputAndSend || provider) && (
+              <button
+                type="button"
+                disabled={repairing}
+                onClick={() => {
+                  const langTag = lang || 'text';
+                  const errBlock = (runResult.errorReason || runResult.output || '').trim() || '(无错误输出)';
+                  if (provider) {
+                    void handleAiRepair(errBlock, 1);
+                    return;
+                  }
+                  onQuoteToInputAndSend(
+                    `以下 ${langTag} 代码保存/编译/执行失败，请重写为可运行的完整代码，并给出需要安装的依赖和安装命令。\n\n` +
+                    `原始代码：\n\`\`\`${langTag}\n${code}\n\`\`\`\n\n错误输出：\n\`\`\`\n${errBlock}\n\`\`\``
+                  );
+                }}
+                className="text-red-300 hover:text-white flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-red-900/40"
+                title="把代码和错误发送给大模型，要求重写并补充依赖安装命令"
+              >
+                <Sparkles size={12} />
+                AI 修复并安装依赖
               </button>
             )}
             <button
@@ -956,6 +1099,7 @@ function CodeBlock({ className, children, inline, __block, onQuoteToInput, onQuo
 
 interface Props {
   content: string;
+  provider?: APIProvider | null;
   /** 将选中内容（或全部 Run 输出）引用到对话输入框 */
   onQuoteToInput?: (text: string) => void;
   /** 引用到输入并立即发送（用于 WebSocket 终端等） */
@@ -964,7 +1108,7 @@ interface Props {
   onOpenUrl?: (url: string, title?: string) => void;
 }
 
-export default function MarkdownRenderer({ content, onQuoteToInput, onQuoteToInputAndSend, onOpenUrl }: Props) {
+export default function MarkdownRenderer({ content, provider, onQuoteToInput, onQuoteToInputAndSend, onOpenUrl }: Props) {
   return (
     <div className="prose prose-invert max-w-none
       [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mb-4 [&_h1]:mt-6 [&_h1]:text-white
@@ -988,7 +1132,7 @@ export default function MarkdownRenderer({ content, onQuoteToInput, onQuoteToInp
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, errorColor: '#f87171', strict: false }]]}
         components={{
-          code: (codeProps) => <CodeBlock {...codeProps} onQuoteToInput={onQuoteToInput} onQuoteToInputAndSend={onQuoteToInputAndSend} onOpenUrl={onOpenUrl} />,
+          code: (codeProps) => <CodeBlock {...codeProps} provider={provider} onQuoteToInput={onQuoteToInput} onQuoteToInputAndSend={onQuoteToInputAndSend} onOpenUrl={onOpenUrl} />,
           // ReactMarkdown v10 no longer passes the old `inline` prop for every
           // code node. Mark children of <pre> explicitly so an unlabeled
           // fenced Python block is still rendered as a runnable block.

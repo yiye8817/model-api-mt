@@ -18,6 +18,7 @@ import sys
 import os
 import subprocess
 import tempfile
+import shutil
 import logging
 import sqlite3
 from logging.handlers import RotatingFileHandler
@@ -2471,9 +2472,36 @@ def _build_run_wrapper(language, code, needs_sudo=False):
         ext, kind = 'py', 'python'
     elif lang in ('javascript', 'js', 'node'):
         ext, kind = 'js', 'node'
+    elif lang in ('c',):
+        ext, kind = 'c', 'c'
+    elif lang in ('cpp', 'c++', 'cxx'):
+        ext, kind = 'cpp', 'cpp'
+    elif lang in ('java',):
+        ext, kind = 'java', 'java'
+    elif lang in ('go',):
+        ext, kind = 'go', 'go'
+    elif lang in ('rust', 'rs'):
+        ext, kind = 'rs', 'rust'
+    elif lang in ('ruby', 'rb'):
+        ext, kind = 'rb', 'ruby'
+    elif lang in ('php',):
+        ext, kind = 'php', 'php'
+    elif lang in ('html',):
+        ext, kind = 'html', 'html'
     else:
         ext, kind = 'sh', 'bash'
-    code_file = prefix + '.' + ext
+    # javac requires the source file name to match a public class. Keep Java
+    # sources in a private run directory so the temporary name is invisible
+    # to the user while still allowing `public class Main` to compile.
+    java_class = 'Main'
+    if kind == 'java':
+        java_match = re.search(r'\bpublic\s+(?:final\s+|abstract\s+)?class\s+([A-Za-z_]\w*)', code)
+        java_class = java_match.group(1) if java_match else 'Main'
+        run_dir = prefix
+        os.makedirs(run_dir, exist_ok=True)
+        code_file = os.path.join(run_dir, java_class + '.java')
+    else:
+        code_file = prefix + '.' + ext
     with open(code_file, 'w', encoding='utf-8') as f:
         f.write(code)
     # 交互阶段的 rc：干净、固定提示符
@@ -2531,6 +2559,77 @@ def _build_run_wrapper(language, code, needs_sudo=False):
             'printf "%b\\n" "${G}==> 执行代码...${N}"',
             f'node {cf_q}',
             '__rc=$?',
+        ]
+    elif kind == 'c':
+        binary = prefix + '.bin'
+        lines += [
+            'printf "%b\\n" "${G}==> 编译 C...${N}"',
+            f'gcc -O2 {cf_q} -o {shlex.quote(binary)}',
+            '__rc=$?',
+            'if [ "$__rc" -eq 0 ]; then',
+            '  printf "%b\\n" "${G}==> 执行代码...${N}"',
+            f'  {shlex.quote(binary)}',
+            '  __rc=$?',
+            'fi',
+        ]
+    elif kind == 'cpp':
+        binary = prefix + '.bin'
+        lines += [
+            'printf "%b\\n" "${G}==> 编译 C++...${N}"',
+            f'g++ -std=c++17 -O2 {cf_q} -o {shlex.quote(binary)}',
+            '__rc=$?',
+            'if [ "$__rc" -eq 0 ]; then',
+            '  printf "%b\\n" "${G}==> 执行代码...${N}"',
+            f'  {shlex.quote(binary)}',
+            '  __rc=$?',
+            'fi',
+        ]
+    elif kind == 'java':
+        class_dir = os.path.dirname(code_file)
+        lines += [
+            'printf "%b\\n" "${G}==> 编译 Java...${N}"',
+            f'javac -d {shlex.quote(class_dir)} {cf_q}',
+            '__rc=$?',
+            'if [ "$__rc" -eq 0 ]; then',
+            '  printf "%b\\n" "${G}==> 执行代码...${N}"',
+            f'  java -cp {shlex.quote(class_dir)} {shlex.quote(java_class)}',
+            '  __rc=$?',
+            'fi',
+        ]
+    elif kind == 'go':
+        lines += [
+            'printf "%b\\n" "${G}==> 执行 Go...${N}"',
+            f'go run {cf_q}',
+            '__rc=$?',
+        ]
+    elif kind == 'rust':
+        binary = prefix + '.bin'
+        lines += [
+            'printf "%b\\n" "${G}==> 编译 Rust...${N}"',
+            f'rustc -O {cf_q} -o {shlex.quote(binary)}',
+            '__rc=$?',
+            'if [ "$__rc" -eq 0 ]; then',
+            '  printf "%b\\n" "${G}==> 执行代码...${N}"',
+            f'  {shlex.quote(binary)}',
+            '  __rc=$?',
+            'fi',
+        ]
+    elif kind == 'ruby':
+        lines += [
+            'printf "%b\\n" "${G}==> 执行 Ruby...${N}"',
+            f'ruby {cf_q}',
+            '__rc=$?',
+        ]
+    elif kind == 'php':
+        lines += [
+            'printf "%b\\n" "${G}==> 执行 PHP...${N}"',
+            f'php {cf_q}',
+            '__rc=$?',
+        ]
+    elif kind == 'html':
+        lines += [
+            'printf "%b\\n" "${G}==> HTML 文件已保存，可使用预览按钮打开。${N}"',
+            '__rc=0',
         ]
     else:  # bash / sh
         lines += [
@@ -4909,6 +5008,22 @@ _AGENT_PLAN_SYSTEM = (
     "title 用一句话概括（≤20字），description 解释这一步要做什么及关键命令/工具（一两句话即可）。"
 )
 
+_AGENT_PROMPT_SYSTEM = (
+    "你是项目需求提示词设计助手。根据用户需求、运行环境和目标编程语言，"
+    "生成一段可以直接发送给代码大模型的工程开发提示词。提示词必须明确项目目标、"
+    "运行环境、语言、目录结构、入口文件、依赖安装、编译/运行命令、错误处理和验收标准。"
+    "只输出 JSON，不要 markdown 或额外说明。格式："
+    '{"prompt":"完整提示词","summary":"一句话概括"}'
+)
+
+_AGENT_CODE_FIX_SYSTEM = (
+    "你是跨语言编译与依赖修复助手。给定一段代码、语言和真实执行错误，"
+    "请返回可以直接替换原文件的完整代码。根据需要给出依赖包和安装命令，"
+    "不要省略代码，不要输出 markdown 围栏。只输出 JSON："
+    '{"code":"完整代码","language":"语言","dependencies":["包名"],'
+    '"install_commands":["安装命令"],"summary":"修复说明"}'
+)
+
 _AGENT_SCRIPT_SYSTEM = (
     "你是一个脚本生成助手。根据用户的任务和已规划好的步骤，生成一个**单文件、可直接执行**的脚本。"
     "\n"
@@ -5063,11 +5178,99 @@ def _require_provider(data):
     return (base_url, api_key, model), None, None
 
 
+@app.route('/api/agent/prompt', methods=['POST'])
+def agent_prompt():
+    """Turn a short project request into a complete prompt for the current chat."""
+    data = request.json or {}
+    goal = (data.get('message') or '').strip()
+    environment = (data.get('environment') or 'local').strip()
+    language = (data.get('language') or 'python').strip().lower()
+    if not goal:
+        return jsonify({'error': 'message required'}), 400
+    triple, err_resp, err_code = _require_provider(data)
+    if err_resp is not None:
+        return err_resp, err_code
+    base_url, api_key, model = triple
+    user_prompt = (
+        f"用户需求：{goal}\n"
+        f"运行环境：{environment}\n"
+        f"目标语言：{language}\n\n"
+        "请生成一段可直接交给代码生成模型的完整工程提示词。"
+        "必须要求输出完整项目文件、相对路径、依赖清单、入口文件、编译命令、运行命令、"
+        "验收方式和失败后的诊断信息。"
+    )
+    try:
+        ai_text, _ = _llm_json_chat_full(
+            base_url, api_key, model, _AGENT_PROMPT_SYSTEM, user_prompt, max_tokens=3000,
+        )
+    except http_requests.exceptions.RequestException as exc:
+        logger.error('agent_prompt LLM error: %s', exc)
+        return jsonify({'error': str(exc)}), 502
+    parsed = _extract_json_object(ai_text)
+    prompt = str(parsed.get('prompt') or '').strip() if isinstance(parsed, dict) else ''
+    if not prompt:
+        # Keep the feature useful with models that ignore the JSON instruction.
+        prompt = ai_text.strip()
+    if not prompt:
+        return jsonify({'error': 'LLM did not return a prompt'}), 422
+    return jsonify({
+        'prompt': prompt,
+        'summary': str(parsed.get('summary') or '').strip() if isinstance(parsed, dict) else '',
+        'environment': environment,
+        'language': language,
+    })
+
+
+@app.route('/api/agent/fix-code', methods=['POST'])
+def agent_fix_code():
+    """Rewrite a failed code block using the selected provider."""
+    data = request.json or {}
+    code = str(data.get('code') or '')
+    language = str(data.get('language') or 'text').strip().lower()
+    output = str(data.get('output') or '')[-6000:]
+    exit_code = data.get('exitCode')
+    if not code.strip():
+        return jsonify({'error': 'code required'}), 400
+    triple, err_resp, err_code = _require_provider(data)
+    if err_resp is not None:
+        return err_resp, err_code
+    base_url, api_key, model = triple
+    user_prompt = (
+        f"语言: {language}\n退出码: {exit_code}\n"
+        f"原始代码:\n```{language}\n{code}\n```\n"
+        f"编译/执行输出:\n```\n{output}\n```\n"
+        "请修复所有错误，保留原始需求，返回完整可替换代码；如果缺少依赖，同时给出安装命令。"
+    )
+    try:
+        ai_text, _ = _llm_json_chat_full(
+            base_url, api_key, model, _AGENT_CODE_FIX_SYSTEM, user_prompt, max_tokens=12000,
+        )
+    except http_requests.exceptions.RequestException as exc:
+        logger.error('agent_fix_code LLM error: %s', exc)
+        return jsonify({'error': str(exc)}), 502
+    parsed = _extract_json_object(ai_text)
+    fixed = str(parsed.get('code') or '').strip() if isinstance(parsed, dict) else ''
+    if not fixed:
+        block = re.search(r'```(?:[a-zA-Z0-9_+\-]*)\s*\n([\s\S]*?)\n?```', ai_text)
+        fixed = block.group(1).strip() if block else ''
+    if not fixed:
+        return jsonify({'error': 'LLM did not return replacement code', 'raw': ai_text[:2000]}), 422
+    return jsonify({
+        'code': fixed,
+        'language': str(parsed.get('language') or language).strip().lower() if isinstance(parsed, dict) else language,
+        'dependencies': parsed.get('dependencies') if isinstance(parsed, dict) and isinstance(parsed.get('dependencies'), list) else [],
+        'install_commands': parsed.get('install_commands') if isinstance(parsed, dict) and isinstance(parsed.get('install_commands'), list) else [],
+        'summary': str(parsed.get('summary') or '').strip() if isinstance(parsed, dict) else '',
+    })
+
+
 @app.route('/api/agent/plan', methods=['POST'])
 def agent_plan():
     """User goal → list of steps. Body: { message, baseUrl, apiKey, model }."""
     data = request.json or {}
     goal = (data.get('message') or '').strip()
+    environment = (data.get('environment') or 'local-linux').strip()
+    preferred_language = (data.get('language') or '').strip().lower()
     if not goal:
         return jsonify({"error": "message required"}), 400
     triple, err_resp, err_code = _require_provider(data)
@@ -5077,6 +5280,8 @@ def agent_plan():
 
     user_prompt = (
         f"任务: {goal}\n"
+        f"运行环境: {environment}\n"
+        f"用户首选语言: {preferred_language or '由模型选择'}\n"
         "请输出 JSON {steps: [{title, description}, ...], language: \"为该任务推荐的最合适编程语言\"}。\n"
         "language 从 python/node/go/c/cpp/java/rust/bash 中选最合适的一个；若是通用脚本/运维类任务用 bash 或 python。"
     )
@@ -5110,6 +5315,7 @@ def agent_script():
     goal = (data.get('message') or '').strip()
     steps = data.get('steps') or []
     pref_lang = (data.get('language') or '').strip().lower()
+    environment = (data.get('environment') or 'local-linux').strip()
     if not goal or not isinstance(steps, list) or not steps:
         return jsonify({"error": "message and steps required"}), 400
     triple, err_resp, err_code = _require_provider(data)
@@ -5318,8 +5524,30 @@ def _project_run_sh(language, entry, run_cmd, deps):
                  'echo "==> 运行"', f'exec {run_cmd or "go run ."}']
     elif lang in ('bash', 'sh', 'shell'):
         body += ['echo "==> 运行"', f'exec {run_cmd or ("bash " + shlex.quote(entry))}']
+    elif lang == 'c':
+        body += [
+            'echo "==> 编译 C"',
+            f'gcc -O2 {shlex.quote(entry)} -o .project-bin',
+            'echo "==> 运行"',
+            'exec ./.project-bin',
+        ]
+    elif lang in ('cpp', 'c++', 'cxx'):
+        body += [
+            'echo "==> 编译 C++"',
+            f'g++ -std=c++17 -O2 {shlex.quote(entry)} -o .project-bin',
+            'echo "==> 运行"',
+            'exec ./.project-bin',
+        ]
+    elif lang in ('rust', 'rs'):
+        body += [
+            'echo "==> 编译 Rust"',
+            f'rustc -O {shlex.quote(entry)} -o .project-bin',
+            'echo "==> 运行"',
+            'exec ./.project-bin',
+        ]
     else:
-        # c / cpp / java / rust 等：信任 LLM 给的 run_cmd（编译+运行）
+        # Java and unusual project layouts may need package-specific commands;
+        # keep the model-provided command for those cases.
         body += ['echo "==> 编译并运行"', run_cmd or 'echo "未提供 run_cmd"; exit 1']
     return '\n'.join(header + body) + '\n'
 
@@ -5416,6 +5644,7 @@ def agent_project():
     goal = (data.get('message') or '').strip()
     steps = data.get('steps') or []
     pref_lang = (data.get('language') or '').strip().lower()
+    environment = (data.get('environment') or 'local-linux').strip()
     triple, err_resp, err_code = _require_provider(data)
     if err_resp is not None:
         return err_resp, err_code
@@ -5428,7 +5657,10 @@ def agent_project():
         for i, s in enumerate(steps) if isinstance(s, dict)
     )
     lang_hint = f"\n推荐语言: {pref_lang}" if pref_lang else ""
-    user_prompt = f"任务: {goal}\n开发计划:\n{steps_text}{lang_hint}\n请生成工程化项目，输出 JSON。"
+    user_prompt = (
+        f"任务: {goal}\n运行环境: {environment}\n开发计划:\n{steps_text}{lang_hint}\n"
+        "请生成工程化项目，输出 JSON。"
+    )
     try:
         ai_text, finish_reason = _llm_json_chat_full(base_url, api_key, model, _AGENT_PROJECT_SYSTEM, user_prompt, max_tokens=12000)
     except http_requests.exceptions.RequestException as e:
@@ -6985,6 +7217,8 @@ def _build_save_runner(language, filename, code):
         body += ['echo "==> 运行"', f'exec ruby {fq}']
     elif lang == 'php':
         body += ['echo "==> 运行"', f'exec php {fq}']
+    elif lang == 'html':
+        body += ['echo "==> HTML 文件已保存，可使用前端预览按钮打开"']
     else:
         return ('', '', [], None)
 
@@ -7158,6 +7392,84 @@ def save_sudo_password():
     return jsonify({"ok": True})
 
 
+def _run_saved_code(language, code, timeout_sec=30, compile_only=False):
+    """Run a saved/compiled snippet through the same generated runner used by
+    the Save action. This keeps compiler flags, Java class naming and runtime
+    output identical between code blocks and project files."""
+    lang = (language or '').strip().lower()
+    run_dir = tempfile.mkdtemp(prefix='.run-code-', dir=WORKSPACE_DIR)
+    try:
+        filename = _infer_code_filename(code, lang)
+        if lang == 'java':
+            # _infer_code_filename already follows public class naming rules.
+            filename = filename if filename.endswith('.java') else 'Main.java'
+        code_path = os.path.join(run_dir, filename)
+        os.makedirs(os.path.dirname(code_path), exist_ok=True)
+        with open(code_path, 'w', encoding='utf-8') as handle:
+            handle.write(code)
+
+        runner_name, runner_script, _deps, _req_name = _build_save_runner(lang, filename, code)
+        if not runner_script:
+            return {
+                'output': f"语言 {lang or '(未指定)'} 没有可用的编译/运行器",
+                'exit_code': 1,
+                'error': 'unsupported language runner',
+            }
+        # For compile-only requests, strip the run portion from the generated
+        # runner and let the compiler's own diagnostics reach the UI.
+        if compile_only and lang == 'go':
+            lines = runner_script.splitlines()
+            kept = []
+            for line in lines:
+                if line.strip() in {'echo "==> 运行"', 'echo "==> 执行"'}:
+                    break
+                kept.append(line)
+            kept += ['echo "==> 编译 Go"', f'go build -o .run-code-bin {shlex.quote(filename)}']
+            runner_script = '\n'.join(kept) + '\n'
+        elif compile_only and lang in {'c', 'cpp', 'c++', 'cxx', 'java', 'rust', 'rs'}:
+            lines = runner_script.splitlines()
+            kept = []
+            for line in lines:
+                if line.strip() in {'echo "==> 运行"', 'echo "==> 执行"'}:
+                    break
+                if line.strip().startswith('exec ./') or line.strip().startswith('exec java '):
+                    break
+                kept.append(line)
+            runner_script = '\n'.join(kept) + '\n'
+        runner_path = os.path.join(run_dir, runner_name or 'run.sh')
+        with open(runner_path, 'w', encoding='utf-8') as handle:
+            handle.write(runner_script)
+        os.chmod(runner_path, 0o755)
+        result = subprocess.run(
+            ['bash', runner_path],
+            cwd=run_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+        )
+        output = result.stdout or ''
+        if result.stderr:
+            output += ('\n' if output else '') + result.stderr
+        return {
+            'output': output,
+            'exit_code': result.returncode,
+            'error': result.stderr if result.returncode != 0 else None,
+            'file': filename,
+            'compiled': lang in {'c', 'cpp', 'c++', 'cxx', 'java', 'go', 'rust', 'rs'},
+            'compile_only': bool(compile_only),
+        }
+    except subprocess.TimeoutExpired:
+        return {'output': '', 'exit_code': 124, 'error': f'Execution timed out ({timeout_sec} second limit)'}
+    except FileNotFoundError as exc:
+        return {'output': '', 'exit_code': 127, 'error': f'Runtime/compiler not found: {exc}'}
+    except Exception as exc:
+        logger.exception('saved code execution failed')
+        return {'output': '', 'exit_code': 1, 'error': str(exc)}
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
 @app.route('/api/run-code', methods=['POST'])
 def run_code():
     """Execute code and return the output. For shell with sudo, password can be sent or read from workspace file."""
@@ -7165,6 +7477,7 @@ def run_code():
     code = data.get('code', '')
     language = data.get('language', '')
     sudo_password = data.get('sudoPassword')  # optional; if provided, save and use
+    compile_only = bool(data.get('compileOnly'))
     # 可选: 额外环境变量（agent 工作流把参数表单的值注入到这里）。仅接收 string→string。
     extra_env_raw = data.get('env')
     extra_env = {}
@@ -7189,6 +7502,14 @@ def run_code():
 
     if not code:
         return jsonify({"error": "code is required"}), 400
+
+    # Compiled languages share the saved runner implementation. HTML is
+    # treated as a successful render target; the frontend opens it in the
+    # sandboxed preview panel after saving.
+    compiled_languages = {'c', 'cpp', 'c++', 'cxx', 'java', 'rust', 'rs', 'go', 'ruby', 'rb', 'php', 'html'}
+    if str(language).lower() in compiled_languages:
+        result = _run_saved_code(language, code, timeout_sec=timeout_sec, compile_only=compile_only)
+        return jsonify(result), (200 if result.get('exit_code') == 0 else 400)
 
     lang_config = {
         'python': {'cmd': [sys.executable], 'ext': '.py'},

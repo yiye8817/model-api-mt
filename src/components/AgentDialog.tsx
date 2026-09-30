@@ -62,16 +62,22 @@ interface Props {
   mode?: 'script' | 'project';
   /** 打开后自动跑：计划 → 工程代码 → 执行（用于 auto-route 命中「代码编写」）。 */
   autoStart?: boolean;
+  /** 将 AI 生成的工程提示词写回当前对话输入框。 */
+  onInsertPrompt?: (text: string) => void;
   onClose: () => void;
 }
 
-export default function AgentDialog({ visible, provider, initialGoal, mode = 'script', autoStart = false, onClose }: Props) {
+export default function AgentDialog({ visible, provider, initialGoal, mode = 'script', autoStart = false, onInsertPrompt, onClose }: Props) {
   const [stage, setStage] = useState<Stage>('goal');
   const [goal, setGoal] = useState('');
   const [refinement, setRefinement] = useState('');
   const [steps, setSteps] = useState<PlanStep[]>([]);
   // 多文件工程化（project 模式）
   const [planLanguage, setPlanLanguage] = useState('');
+  const [projectLanguage, setProjectLanguage] = useState('python');
+  const [environment, setEnvironment] = useState('local-linux');
+  const [promptLoading, setPromptLoading] = useState(false);
+  const [generatedPrompt, setGeneratedPrompt] = useState('');
   const [projectFiles, setProjectFiles] = useState<ProjectFile[]>([]);
   const [projectMeta, setProjectMeta] = useState<ProjectMeta | null>(null);
   const [activeFile, setActiveFile] = useState('');
@@ -153,6 +159,10 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
       setStepReasons({});
       setWindowMode('normal');
       setPlanLanguage('');
+      setProjectLanguage('python');
+      setEnvironment('local-linux');
+      setPromptLoading(false);
+      setGeneratedPrompt('');
       setProjectFiles([]);
       setProjectMeta(null);
       setActiveFile('');
@@ -203,6 +213,10 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
     setAutoFixCount(0);
     setRegeneratingIndex(null);
     setStepReasons({});
+    setProjectLanguage('python');
+    setEnvironment('local-linux');
+    setPromptLoading(false);
+    setGeneratedPrompt('');
   }, []);
 
   // ========== 停止：中断当前执行 / LLM 调用，并阻断自动修复重跑 ==========
@@ -325,6 +339,8 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
         signal,
         body: JSON.stringify({
           message: goalArg.trim(),
+          environment,
+          language: isProject ? projectLanguage : undefined,
           baseUrl: provider.baseUrl,
           apiKey: provider.apiKey,
           model: provider.selectedModel,
@@ -349,7 +365,7 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
     } finally {
       setLoading(false);
     }
-  }, [provider, beginOp, isProject]);
+  }, [provider, beginOp, environment, isProject, projectLanguage]);
 
   const handleGeneratePlan = () => { void doPlan(goal); };
 
@@ -370,7 +386,8 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
         body: JSON.stringify({
           message: goalArg,
           steps: stepsArg,
-          language: langArg,
+          language: langArg || projectLanguage,
+          environment,
           baseUrl: provider.baseUrl,
           apiKey: provider.apiKey,
           model: provider.selectedModel,
@@ -402,9 +419,39 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
     } finally {
       setLoading(false);
     }
-  }, [provider, beginOp]);
+  }, [provider, beginOp, environment, projectLanguage]);
 
-  const handleGenerateProject = () => { void doProject(goal, steps, planLanguage); };
+  const handleGenerateProject = () => { void doProject(goal, steps, projectLanguage || planLanguage); };
+
+  const handleGeneratePrompt = useCallback(async () => {
+    if (!provider || !goal.trim()) return;
+    setPromptLoading(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/agent/prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: goal.trim(),
+          environment,
+          language: projectLanguage,
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey,
+          model: provider.selectedModel,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.error || `提示词生成失败 (${response.status})`);
+      const prompt = String(data?.prompt || '').trim();
+      if (!prompt) throw new Error('模型没有返回提示词');
+      setGeneratedPrompt(prompt);
+      onInsertPrompt?.(prompt);
+    } catch (e: any) {
+      setError(e?.message || '提示词生成失败');
+    } finally {
+      setPromptLoading(false);
+    }
+  }, [environment, goal, onInsertPrompt, projectLanguage, provider]);
 
   // project 模式执行：复用 executeScript，把 exec_command 当作 bash 脚本跑
   const handleExecuteProject = useCallback(async (metaArg?: ProjectMeta) => {
@@ -1082,24 +1129,65 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
               <textarea
                 value={goal}
                 onChange={e => setGoal(e.target.value)}
-                placeholder="例如：把当前目录下所有 PNG 图片压缩 70% 后保存到 ./out 目录；或者：在 Linux 上安装并启动 redis；或者：批量重命名一组文件…"
+                placeholder={isProject
+                  ? '例如：创建一个带登录和数据持久化的 Web 项目，完成基本测试并给出启动命令…'
+                  : '例如：把当前目录下所有 PNG 图片压缩 70% 后保存到 ./out 目录；或者：批量重命名一组文件…'}
                 rows={6}
                 className="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500 resize-y"
               />
               <div className="flex items-center justify-between text-xs text-gray-500">
-                <div>提示：尽量描述清楚输入/输出与约束，结果会更准确。</div>
+                <div>{isProject ? '选择环境和语言后，模型会生成工程提示词并回填到当前对话输入框。' : '提示：尽量描述清楚输入/输出与约束，结果会更准确。'}</div>
                 <div className="flex items-center gap-2">
-                  <span>首选语言:</span>
-                  <select
-                    value={language}
-                    onChange={e => setLanguage(e.target.value as 'bash' | 'python')}
-                    className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs"
-                  >
-                    <option value="bash">bash</option>
-                    <option value="python">python</option>
-                  </select>
+                  {isProject ? (
+                    <>
+                      <span>环境:</span>
+                      <select
+                        value={environment}
+                        onChange={e => setEnvironment(e.target.value)}
+                        className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs"
+                      >
+                        <option value="local-linux">本机 Linux</option>
+                        <option value="local-macos">本机 macOS</option>
+                        <option value="local-windows">本机 Windows</option>
+                        <option value="docker">Docker 容器</option>
+                        <option value="wsl">WSL</option>
+                      </select>
+                      <span>语言:</span>
+                      <select
+                        value={projectLanguage}
+                        onChange={e => setProjectLanguage(e.target.value)}
+                        className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs"
+                      >
+                        <option value="python">Python</option>
+                        <option value="javascript">JavaScript / Node.js</option>
+                        <option value="bash">Shell</option>
+                        <option value="c">C</option>
+                        <option value="cpp">C++</option>
+                        <option value="java">Java</option>
+                        <option value="go">Go</option>
+                        <option value="rust">Rust</option>
+                      </select>
+                    </>
+                  ) : (
+                    <>
+                      <span>首选语言:</span>
+                      <select
+                        value={language}
+                        onChange={e => setLanguage(e.target.value as 'bash' | 'python')}
+                        className="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs"
+                      >
+                        <option value="bash">bash</option>
+                        <option value="python">python</option>
+                      </select>
+                    </>
+                  )}
                 </div>
               </div>
+              {isProject && generatedPrompt && (
+                <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-200">
+                  已生成并回填提示词。你可以先在当前对话中发送它，再继续生成工程；也可以直接继续当前工程流程。
+                </div>
+              )}
             </div>
           )}
 
@@ -1199,15 +1287,28 @@ export default function AgentDialog({ visible, provider, initialGoal, mode = 'sc
           </div>
           <div className="flex items-center gap-2">
             {stage === 'goal' && (
-              <button
-                onClick={handleGeneratePlan}
-                disabled={loading || !goal.trim() || !provider}
-                className="flex items-center gap-1.5 px-4 py-1.5 rounded bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm"
-              >
-                {loading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                生成步骤
-                <ArrowRight size={14} />
-              </button>
+              <div className="flex items-center gap-2">
+                {isProject && (
+                  <button
+                    onClick={() => void handleGeneratePrompt()}
+                    disabled={promptLoading || loading || !goal.trim() || !provider}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded border border-cyan-500/50 text-cyan-200 hover:bg-cyan-900/30 disabled:bg-gray-800 disabled:text-gray-600 text-sm"
+                    title="生成完整工程提示词并回填到当前对话输入框"
+                  >
+                    {promptLoading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                    生成提示词并填入对话框
+                  </button>
+                )}
+                <button
+                  onClick={handleGeneratePlan}
+                  disabled={loading || promptLoading || !goal.trim() || !provider}
+                  className="flex items-center gap-1.5 px-4 py-1.5 rounded bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm"
+                >
+                  {loading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                  生成步骤
+                  <ArrowRight size={14} />
+                </button>
+              </div>
             )}
             {stage === 'plan' && (
               <button

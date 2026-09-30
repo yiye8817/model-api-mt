@@ -381,6 +381,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
               <div className="flex-1 min-w-0 select-text [&_*]:select-text">
                 <MarkdownRenderer
                   content={streamingContent}
+                  provider={provider}
                   onQuoteToInput={handleQuoteToInput}
                   onQuoteToInputAndSend={handleQuoteToInputAndSend}
                   onOpenUrl={onOpenUrl}
@@ -1436,6 +1437,7 @@ function MessageBubble({
             <div className="select-text [&_*]:select-text">
               <MarkdownRenderer
                 content={message.content}
+                provider={provider}
                 onQuoteToInput={onQuoteToInput}
                 onQuoteToInputAndSend={onQuoteToInputAndSend}
                 onOpenUrl={onOpenUrl}

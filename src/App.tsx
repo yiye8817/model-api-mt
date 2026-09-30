@@ -15,6 +15,7 @@ import ClaudeTerminal from './components/ClaudeTerminal';
 import HermesTerminal from './components/HermesTerminal';
 import DesktopAgentPanel from './components/DesktopAgentPanel';
 import CodexTerminalPanel from './components/CodexTerminalPanel';
+import AgentDialog from './components/AgentDialog';
 import { useBackendState } from './hooks/useBackendState';
 import { hostOfUrl, isLikelyFrameBlocked, normalizeHttpUrl } from './lib/webFrame';
 import { browserFileUrl, fileTargetName, isBrowserOpenableFile, resolveFileTarget } from './lib/fileTargets';
@@ -37,7 +38,7 @@ import type {
 import {
   Loader2, ServerOff, Server, Plus, X as XIcon, Sparkles, MessageSquare,
   FileText, FolderTree, ChevronLeft, PanelRightClose, PanelRightOpen,
-  Terminal as TerminalIcon, ChevronRight, Bot, Globe, Trash2, ExternalLink,
+  Terminal as TerminalIcon, ChevronRight, Bot, Globe, Trash2, ExternalLink, Hammer,
 } from 'lucide-react';
 
 const DEFAULT_STATE: AppState = {
@@ -84,6 +85,7 @@ export default function App() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [terminalVisible, setTerminalVisible] = useState(false);
+  const [showProjectRunner, setShowProjectRunner] = useState(false);
   const [injectedForInput, setInjectedForInput] = useState<{ content: string; attachments?: FileAttachment[] } | null>(null);
   const [pendingResend, setPendingResend] = useState<{ convId: string; userMsg: ChatMessage } | null>(null);
   const [pluginEnabled, setPluginEnabled] = useState(false);
@@ -414,11 +416,11 @@ export default function App() {
   // Electron：各类弹层打开期间保持 WebContentsView 隐藏（+ 菜单 / 配置 / 设置等）
   useEffect(() => {
     if (!getDesktop()) return;
-    const overlayOpen = showConfigModal || showLocalHub || showSettings || terminalVisible || showAddMenu;
+    const overlayOpen = showConfigModal || showLocalHub || showSettings || terminalVisible || showAddMenu || showProjectRunner;
     if (!overlayOpen) return;
     acquireDesktopOverlay();
     return () => releaseDesktopOverlay();
-  }, [showConfigModal, showLocalHub, showSettings, terminalVisible, showAddMenu]);
+  }, [showConfigModal, showLocalHub, showSettings, terminalVisible, showAddMenu, showProjectRunner]);
 
   // Electron：离开网页标签时卸下 WebContentsView
   useEffect(() => {
@@ -2045,6 +2047,15 @@ export default function App() {
               >
                 <ExternalLink size={13} />
               </button>
+              <button
+                onClick={() => setShowProjectRunner(true)}
+                disabled={!activeProvider}
+                className="ml-1 p-1 rounded text-gray-500 hover:text-emerald-300 hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="项目运行向导：选择环境和语言，生成、编译、运行并自动修复工程"
+                aria-label="项目运行向导"
+              >
+                <Hammer size={13} />
+              </button>
             </div>
             <div className="ml-auto flex items-center gap-1 shrink-0">
               <button
@@ -2475,6 +2486,15 @@ export default function App() {
         visible={showSettings}
         onClose={() => setShowSettings(false)}
         onSaved={(s) => setSettings(s)}
+      />
+
+      <AgentDialog
+        visible={showProjectRunner}
+        provider={activeProvider}
+        mode="project"
+        initialGoal=""
+        onInsertPrompt={(prompt) => setInjectedForInput({ content: prompt })}
+        onClose={() => setShowProjectRunner(false)}
       />
     </div>
   );

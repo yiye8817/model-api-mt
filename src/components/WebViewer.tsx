@@ -513,7 +513,7 @@ function WebPageAssistant({
             <button type="button" onClick={() => setResult(null)} className="text-gray-500 hover:text-white" title="关闭结果"><X size={12} /></button>
           </div>
       <div className="px-3 py-2 text-[13px] leading-6 text-gray-200 select-text">
-        <MarkdownRenderer content={result.content} onOpenUrl={onOpenUrl} />
+        <MarkdownRenderer content={result.content} provider={selectedProvider} onOpenUrl={onOpenUrl} />
       </div>
         </div>
       )}
