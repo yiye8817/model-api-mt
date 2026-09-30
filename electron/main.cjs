@@ -678,13 +678,23 @@ function installWebCodeRunner(view) {
         .catch(error => showResult(card, { ok: false, error: String(error?.message || error) }, action));
     };
     const scan = () => {
-      document.querySelectorAll('pre code').forEach(codeNode => {
-        const pre = codeNode.closest('pre');
-        if (!pre || pre.getAttribute('data-workbench-code-pre') === '1') return;
+      // ChatGPT 滚动虚拟化时可能保留原 code 节点，却移除我们包裹的卡片。
+      // 清掉这种孤立标记，否则后续扫描会把它误认为已处理。
+      document.querySelectorAll('[data-workbench-code-pre="1"]').forEach(node => {
+        if (!node.closest('[data-workbench-code-card]')) node.removeAttribute('data-workbench-code-pre');
+      });
+      const candidates = document.querySelectorAll('pre code, pre, code[class*="language-"], code[data-language], [data-language] code, [class*="language-"]');
+      const seen = new Set();
+      candidates.forEach(candidate => {
+        const codeNode = candidate.matches('code') ? candidate : (candidate.querySelector('code') || candidate);
+        const pre = candidate.closest('pre');
+        const target = pre || candidate;
+        if (!target || seen.has(target) || target.getAttribute('data-workbench-code-pre') === '1' || target.closest('[data-workbench-code-card]')) return;
+        seen.add(target);
         const source = String(codeNode.textContent || '');
         const language = infer(codeNode, source);
         if (!language) return;
-        const parent = pre.parentElement;
+        const parent = target.parentElement;
         if (!parent) return;
         const card = document.createElement('div');
         card.setAttribute('data-workbench-code-card', '1');
@@ -715,27 +725,31 @@ function installWebCodeRunner(view) {
         const output = document.createElement('pre');
         output.setAttribute('data-workbench-code-output', '1');
         output.style.cssText = 'display:none;white-space:pre-wrap;max-height:260px;overflow:auto;margin:0;padding:8px;background:rgba(2,6,23,.96);border-top:1px solid rgba(148,163,184,.35);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;';
-        pre.setAttribute('data-workbench-code-pre', '1');
-        parent.insertBefore(card, pre);
+        target.setAttribute('data-workbench-code-pre', '1');
+        parent.insertBefore(card, target);
         card.appendChild(toolbar);
-        card.appendChild(pre);
+        card.appendChild(target);
         card.appendChild(output);
       });
     };
+    const scheduleScan = () => {
+      if (window.__workbenchCodeRunnerScanTimer) return;
+      window.__workbenchCodeRunnerScanTimer = setTimeout(() => {
+        window.__workbenchCodeRunnerScanTimer = null;
+        scan();
+      }, 80);
+    };
     if (!window.__workbenchCodeRunnerObserver) {
-      const observer = new MutationObserver(() => {
-        if (window.__workbenchCodeRunnerScanTimer) return;
-        window.__workbenchCodeRunnerScanTimer = setTimeout(() => {
-          window.__workbenchCodeRunnerScanTimer = null;
-          scan();
-        }, 120);
-      });
+      const observer = new MutationObserver(scheduleScan);
       observer.observe(document.documentElement || document, { childList: true, subtree: true });
       window.__workbenchCodeRunnerObserver = observer;
+      window.addEventListener('scroll', scheduleScan, true);
     }
     scan();
+    window.setTimeout(scan, 500);
+    window.setTimeout(scan, 1800);
     return true;
-  })()`, true).catch(() => {});
+  })()`, true).catch(error => log('网页代码工具栏注入失败:', error?.message || error));
 }
 
 function createWindow() {
