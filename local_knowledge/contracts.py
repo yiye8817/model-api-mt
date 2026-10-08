@@ -3,7 +3,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, TypedDict
 
 SourceKind = Literal['document', 'api_chat', 'web_chat', 'web_synthesis']
-REASONS = frozenset(('disabled', 'empty_index', 'local_unavailable', 'uncalibrated',
+REASONS = frozenset(('disabled', 'empty_index', 'local_unavailable', 'qa_not_configured', 'uncalibrated',
     'low_relevance', 'constraint_mismatch', 'context_uncertain', 'insufficient_evidence',
     'evidence_conflict', 'stale_source', 'source_changed', 'invalid_answer', 'local_timeout', 'cancelled'))
 

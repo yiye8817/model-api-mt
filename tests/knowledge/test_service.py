@@ -144,3 +144,12 @@ def test_matching_receives_original_source_context_and_constraints(tmp_path):
     assert original['source_context']['context'][0]['content']=='这一轮只讨论延保'
     assert original['source_context']['system_constraints']=='这是延保的假设场景'
     assert original['source_context']['nature']=='historical_model_answer'
+
+
+def test_optional_qa_returns_clear_miss_without_model_calls_and_preview_still_works(tmp_path):
+    store,models,service,c=build_harness(tmp_path)
+    c['qa_endpoint'].update(url='',model='')
+    result=service.query(request())
+    assert result.decision=='miss' and result.reason=='qa_not_configured'
+    assert result.answer is None and models.calls==[]
+    assert len(service.preview(request(request_id='preview')))==1

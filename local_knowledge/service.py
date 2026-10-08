@@ -3,7 +3,7 @@ import threading
 import time
 from dataclasses import asdict, replace
 
-from .config import request_fingerprint, stable_hash, model_fingerprint
+from .config import request_fingerprint, stable_hash, model_fingerprint, qa_configured
 from .contracts import QueryResult, Citation, Position
 from .ingest import check_file_freshness
 from .matching import Matcher, EvidenceError
@@ -74,6 +74,7 @@ class KnowledgeService:
                 if value.get('decision')=='hit':
                     try:
                         if not config['enabled']:raise EvidenceError('disabled')
+                        if not qa_configured(config):raise EvidenceError('qa_not_configured')
                         profile=self.store.profile(config['evaluation_profile_id'])
                         if not profile or not all(profile.get(k) for k in ('passed','real_models','reviewed')) or profile.get('fingerprint')!=model_fingerprint(config,profile.get('dimension',self.models.dimension)) or previous.get('execution_fingerprint')!=profile.get('fingerprint'):
                             raise EvidenceError('uncalibrated')
@@ -104,6 +105,7 @@ class KnowledgeService:
         try:
             budget.check()
             if not config['enabled'] and evaluation_threshold is None: raise EvidenceError('disabled')
+            if not qa_configured(config): raise EvidenceError('qa_not_configured')
             scope=effective_scope(self.store,request.get('source_ids',[]),config['selected_source_ids'])
             if not scope: raise EvidenceError('empty_index')
             profile=self.store.profile(config['evaluation_profile_id']) if config['evaluation_profile_id'] else None

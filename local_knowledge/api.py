@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from flask import Blueprint, jsonify, request
 
-from .config import request_fingerprint, stable_hash
+from .config import request_fingerprint, stable_hash, import_config
 from .contracts import QueryResult, UploadItem, Source, Chunk, Position
 from .model_clients import Budget, Cancelled, LocalTimeout, ModelUnavailable
 from .store import StoreUnavailable
@@ -62,6 +62,16 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
     def probe():
         s,*_=components()
         return jsonify(roles=s.models.probe(Budget(s.settings()['local_timeout_seconds'],threading.Event())))
+
+    @bp.post('/config/validate')
+    def validate_imported_config():
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict): raise ValueError('配置请求必须是对象')
+        if 'current' in data: current=data['current']
+        else:
+            instance=runtime_instance()
+            current=instance.settings() if instance else service.settings()
+        return jsonify(settings=import_config(data.get('config'),current))
 
     @bp.get('/sources')
     def sources():

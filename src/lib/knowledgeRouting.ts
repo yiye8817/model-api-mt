@@ -27,6 +27,6 @@ export function createRequestGuard() {
   };
 }
 
-export const knowledgeReasons:Record<string,string>={disabled:'功能未开启',empty_index:'没有可用的已索引资料',local_unavailable:'本地服务不可用',uncalibrated:'模型尚未通过校准',
+export const knowledgeReasons:Record<string,string>={disabled:'功能未开启',empty_index:'没有可用的已索引资料',local_unavailable:'本地服务不可用',qa_not_configured:'未配置本地问答模型',uncalibrated:'模型尚未通过校准',
   low_relevance:'没有相关证据',constraint_mismatch:'关键条件不符',context_uncertain:'无法确定问题指代',insufficient_evidence:'证据不完整',evidence_conflict:'资料存在冲突',
   stale_source:'资料时效无法确认',source_changed:'来源已变更',invalid_answer:'答案未通过证据检查',local_timeout:'本地处理超时'};

@@ -11,7 +11,7 @@ import time
 from dataclasses import replace
 from urllib.parse import urlsplit
 
-from .config import validate_config, model_fingerprint
+from .config import validate_config, model_fingerprint, qa_configured
 
 
 class ModelUnavailable(RuntimeError):
@@ -240,6 +240,9 @@ class ModelClients:
         from .contracts import Chunk, Candidate
         out = {}
         for role in ('embedding','rerank','qa'):
+            if role == 'qa' and not qa_configured(self.config):
+                out[role] = dict(available=False, skipped=True, configured=False, model='', fingerprint=None, error=None)
+                continue
             try:
                 if role == 'embedding':
                     self.embed(['local capability probe'],budget)

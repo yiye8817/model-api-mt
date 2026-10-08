@@ -101,3 +101,14 @@ def test_model_revision_changes_fingerprint():
     first = model_fingerprint(c, 3)
     c['qa_endpoint']['model_revision'] = 'new-weights'
     assert model_fingerprint(c, 3) != first
+
+
+def test_probe_skips_optional_unconfigured_qa_but_checks_both_retrieval_roles():
+    from local_knowledge.model_clients import ModelClients
+    with ModelServer({'/v1/embeddings':{'data':[{'index':0,'embedding':[1.,0.]}]},
+        '/v1/rerank':{'results':[{'index':0,'relevance_score':.8}]}}) as s:
+        config=s.config;config['qa_endpoint'].update(url='',model='')
+        roles=ModelClients(config).probe(budget())
+        assert roles['embedding']['available'] and roles['rerank']['available']
+        assert roles['qa'].get('skipped') is True and roles['qa']['error'] is None
+        assert len(s.calls)==2

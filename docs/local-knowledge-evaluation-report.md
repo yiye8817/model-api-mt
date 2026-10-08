@@ -4,7 +4,7 @@
 
 ## 当前结论
 
-程序的确定性行为已通过自动化检查。**实际模型精度验收未完成**：原工作区与实施工作区均没有配置 embedding、rerank、问答三个本地端点。未运行真实模型的独立验证集，也没有激活实际模型评测配置。
+程序的确定性行为已通过自动化检查。**实际模型精度验收未完成**：向量与重排模型已下载并单独完成接口验证，本地问答模型尚未配置。未完成三个角色参与的真实模型独立验证，也没有激活正式的实际模型评测配置。
 
 不能将测试替身中的分数或答案视为语义精度证明。配置本地服务、导入业务资料、运行独立评测并人工核对引用后，才可验收和激活自动回答。
 
@@ -12,16 +12,18 @@
 
 | 检查 | 结果 |
 |---|---|
-| `PYTHONPATH=desktop-agent/src .venv/bin/python -m pytest` | 165 passed；包含既有 Agent 测试与新增知识功能测试 |
+| `PYTHONPATH=desktop-agent/src .venv/bin/python -m pytest` | 179 passed；包含既有 Agent 测试与新增知识功能测试 |
 | `PYTHONPATH=desktop-agent/src .venv/bin/python -m unittest discover -s desktop-agent/tests -v` | 13 tests，OK |
-| `npm run test:knowledge` | 20 passed；包含真实 App 本地命中、无 provider、新建会话、网页群聊前置检查、原目标兜底、取消、部分流、逐项上传失败和综合失败后的原始回答保存 |
+| `npm run test:knowledge` | 26 passed；包含真实 App 路由、资料管理、JSON 配置导入、可选问答模型和导入/保存串行处理 |
 | `npx tsc --noEmit` | 通过 |
 | `npm run build` | 通过 |
 | `npm run test:web-chat` | `electron_web_chat_dom=passed`；包括明确角色消息、未知历史、发送前/生成中/复制阶段取消和原有复制提取回归 |
 
 新增端到端测试使用真实临时 SQLite/Chroma、文档解析和回环 HTTP 协议替身。它们验证索引提交、同义问法的路由、引用位置、原文件变更后旧答案失效以及条件检查；不证明实际模型能理解所有这些输入。
 
-实际解析的依赖版本：Python 3.12.3、Flask 3.1.3、requests 2.34.2、Chroma 1.5.9、pypdf 6.19.0、python-docx 1.2.0、pytest 9.1.1；Node 22.23.1、React 19.2.3、Electron 37.10.3、Vitest 5.0.3、jsdom 30.1.2。三个实际模型的服务版本、权重指纹、向量维度及阈值未取得。
+实际解析的依赖版本：Python 3.12.3、Flask 3.1.3、requests 2.34.2、Chroma 1.5.9、pypdf 6.19.0、python-docx 1.2.0、pytest 9.1.1；Node 22.23.1、React 19.2.3、Electron 37.10.3、Vitest 5.0.3、jsdom 30.1.2。向量、重排的文件与服务身份见启动脚本生成的配置；完整问答评测指纹和校准阈值尚未取得。
+
+2026-10-08 的配置导入更新经过独立复核。复核发现的“导入与保存并发覆盖”和“有效文件无法修复无效草稿”均用先失败、后通过的回归测试修正。最终 Python 179 项、前端 26 项测试及类型检查、构建通过；真实配置文件在只读验证接口中验证成功，页面已构建并在 8766 端口启动。本次未重新运行未改动的 Electron DOM 测试。
 
 ## 独立代码复核与修正
 

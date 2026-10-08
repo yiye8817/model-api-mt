@@ -71,6 +71,7 @@ export default function SettingsModal({ visible, onClose, onSaved, initialTab = 
   const [llmProviders, setLlmProviders] = useState<APIProvider[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [knowledgeImporting, setKnowledgeImporting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string; sample?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -103,7 +104,7 @@ export default function SettingsModal({ visible, onClose, onSaved, initialTab = 
   }, [visible, refresh, initialTab]);
 
   const handleSave = useCallback(async () => {
-    if (!settings) return;
+    if (!settings || knowledgeImporting || saving) return;
     setSaving(true);
     setError(null);
     try {
@@ -121,7 +122,7 @@ export default function SettingsModal({ visible, onClose, onSaved, initialTab = 
     } finally {
       setSaving(false);
     }
-  }, [settings, onSaved]);
+  }, [settings, onSaved, knowledgeImporting, saving]);
 
   const handleResetSection = useCallback(async (section: 'model_params' | 'web_search' | 'model_roles' | 'model_endpoints') => {
     const labelMap: Record<string, string> = {
@@ -235,7 +236,7 @@ export default function SettingsModal({ visible, onClose, onSaved, initialTab = 
               onReset={() => handleResetSection('model_params')}
             />
           ) : tab === 'knowledge' ? (
-            <KnowledgeSettings value={settings.local_knowledge||localKnowledgeDefaults()} onChange={value=>setSettings({...settings,local_knowledge:value})}/>
+            <KnowledgeSettings value={settings.local_knowledge||localKnowledgeDefaults()} onChange={value=>setSettings(current=>current?{...current,local_knowledge:value}:current)} onImportingChange={setKnowledgeImporting} disabled={saving}/>
           ) : tab === 'roles' ? (
             <ModelRolesTab
               roles={settings.model_roles}
@@ -263,7 +264,8 @@ export default function SettingsModal({ visible, onClose, onSaved, initialTab = 
           <button onClick={onClose} className="px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-sm">取消</button>
           <button
             onClick={handleSave}
-            disabled={!settings || saving}
+            disabled={!settings || saving || knowledgeImporting}
+            title={knowledgeImporting?'配置导入中，请稍候':undefined}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-white text-sm"
           >
             {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存

@@ -77,6 +77,25 @@ def validate_config(value: dict) -> dict:
     return c
 
 
+def import_config(value, current):
+    if not isinstance(value, dict):
+        raise ValueError('配置 JSON 必须是对象')
+    patch = value.get('local_knowledge') if 'local_knowledge' in value else value
+    if not isinstance(patch, dict) or not patch:
+        raise ValueError('配置文件需要包含非空的 local_knowledge 配置或本地知识字段')
+    if not isinstance(current, dict):
+        raise ValueError('当前本地知识设置必须是对象')
+    # Validate the merged form so omitted permissions/protocols retain their
+    # current values. Other exported app settings never enter this group.
+    return validate_config(merge_config(current, patch))
+
+
+def qa_configured(config):
+    """Only a wholly blank endpoint is optional; partial setup still reports errors."""
+    endpoint = config['qa_endpoint']
+    return bool(endpoint['url'] or endpoint['model'])
+
+
 def stable_hash(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 

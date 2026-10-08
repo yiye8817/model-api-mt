@@ -207,3 +207,57 @@ def test_web_send_counts_do_not_require_a_completed_answer(api):
     assert first.status_code==second.status_code==200
     assert client.get('/api/knowledge/requests/web-q').json['online_model_requests']==1
     assert not store.connection.execute('SELECT 1 FROM qa_records').fetchone()
+
+
+def test_config_import_merges_partial_roles_without_saving_or_requiring_qa(server_client):
+    from local_knowledge.config import default_config
+    client,runtime=server_client
+    client.post('/api/settings',json={'model_params':{'temperature':.4},'local_knowledge':{'online_fallback':False}})
+    before=client.get('/api/settings').json
+    current=before['local_knowledge'];current['selected_source_ids']=['chosen'];current['qa_endpoint']['model']=''
+    payload={'local_knowledge':{'embedding_endpoint':{'url':'http://127.0.0.1:18011','model':'bge-m3','model_revision':'weights'},
+        'rerank_endpoint':{'url':'http://127.0.0.1:18012','model':'bge-reranker-v2-m3'}},'model_params':{'temperature':1}}
+    response=client.post('/api/knowledge/config/validate',json={'config':payload,'current':current})
+    assert response.status_code==200
+    imported=response.json['settings']
+    assert imported['embedding_endpoint']['model']=='bge-m3'
+    assert imported['rerank_endpoint']['model']=='bge-reranker-v2-m3'
+    assert imported['qa_endpoint']==default_config()['qa_endpoint']
+    assert imported['online_fallback'] is False and imported['selected_source_ids']==['chosen']
+    assert client.get('/api/settings').json['model_params']['temperature']==.4
+    assert client.get('/api/settings').json['local_knowledge']['embedding_endpoint']['model']==''
+    assert client.post('/api/settings',json={'local_knowledge':imported}).status_code==200
+
+
+@pytest.mark.parametrize('config',[[],{'local_knowledge':None},{'embedding_endpoint':None},{'enabled':'yes'},
+    {'embedding_endpoint':{'url':'https://public.example'}},{'embedding_endpoint':{'apiKey':'secret'}},
+    {'__proto__':{}},{}])
+def test_config_import_rejects_invalid_content_atomically(api,config):
+    client,store,c,imports=api
+    response=client.post('/api/knowledge/config/validate',json={'config':config,'current':c})
+    assert response.status_code==400
+    assert c['qa_endpoint']['model']=='fixture'
+
+
+def test_config_import_accepts_flat_settings_and_preserves_existing_qa(api):
+    client,store,c,imports=api
+    response=client.post('/api/knowledge/config/validate',json={'config':{'embedding_endpoint':{'model':'new'}},'current':c})
+    assert response.status_code==200
+    assert response.json['settings']['embedding_endpoint']['model']=='new'
+    assert response.json['settings']['qa_endpoint']==c['qa_endpoint']
+
+
+def test_config_import_preserves_existing_lan_permission_when_url_is_updated(api):
+    client,store,c,imports=api
+    c['embedding_endpoint']['allow_lan']=True
+    response=client.post('/api/knowledge/config/validate',json={'config':{'embedding_endpoint':{'url':'http://192.168.1.10:18011'}},'current':c})
+    assert response.status_code==200
+    assert response.json['settings']['embedding_endpoint']['allow_lan'] is True
+
+
+def test_config_import_can_repair_invalid_unsaved_fields(api):
+    client,store,c,imports=api
+    current={**c,'embedding_endpoint':{**c['embedding_endpoint'],'url':'http://'}}
+    response=client.post('/api/knowledge/config/validate',json={'config':{'embedding_endpoint':{'url':'http://127.0.0.1:18011'}},'current':current})
+    assert response.status_code==200
+    assert response.json['settings']['embedding_endpoint']['url']=='http://127.0.0.1:18011'
