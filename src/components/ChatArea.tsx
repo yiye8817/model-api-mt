@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import KnowledgeCitations from './KnowledgeCitations';
+import type {Citation} from '../lib/knowledgeTypes';
 import {
   Send, Loader2, Bot, User, AlertCircle, Sparkles,
   Paperclip, Image, FileText, X, File as FileIcon, RotateCcw, Pencil,
@@ -15,6 +17,8 @@ import { isDesktopApp, type WebChatTarget } from '../lib/desktopBridge';
 interface Props {
   localKnowledgeEnabled?: boolean;
   knowledgeProgress?: string;
+  onOpenKnowledge?: () => void;
+  onOpenCitation?: (citation:Citation) => void;
   conversation: Conversation | null;
   provider: APIProvider | null;
   onSendMessage: (content: string, attachments?: FileAttachment[], options?: { webSearch?: boolean; webChatTargets?: string[] }) => void;
@@ -57,7 +61,7 @@ function formatFileSize(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-export default function ChatArea({ conversation, provider, onSendMessage, isLoading, streamingContent, injectedInput, injectedAttachments, onInjectedInputConsumed, onResend, onEditUserMessage, onLikeMessage, pluginEnabled, onPluginEnabledChange, onPluginRun, onPluginChat, onPluginReloadCode, onOpenSettings, isBusy, onStop, autoRouteEnabled, onAutoRouteEnabledChange, agentRequest, onAgentRequestConsumed, webChatTargets = [], webChatAggregator, onWebChatSelectionChange, onOpenWebChatSite, onOpenUrl, localKnowledgeEnabled, knowledgeProgress }: Props) {
+export default function ChatArea({ conversation, provider, onSendMessage, isLoading, streamingContent, injectedInput, injectedAttachments, onInjectedInputConsumed, onResend, onEditUserMessage, onLikeMessage, pluginEnabled, onPluginEnabledChange, onPluginRun, onPluginChat, onPluginReloadCode, onOpenSettings, isBusy, onStop, autoRouteEnabled, onAutoRouteEnabledChange, agentRequest, onAgentRequestConsumed, webChatTargets = [], webChatAggregator, onWebChatSelectionChange, onOpenWebChatSite, onOpenUrl, localKnowledgeEnabled, knowledgeProgress, onOpenKnowledge, onOpenCitation }: Props) {
   const busy = !!(isBusy ?? isLoading);
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
@@ -305,6 +309,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-medium text-white truncate">{conversation.title}</h2>
           {localKnowledgeEnabled && <span className="text-xs text-emerald-300">本地优先</span>}
+          {onOpenKnowledge&&<button className="text-xs text-emerald-300" onClick={onOpenKnowledge}>资料管理</button>}
           <div className="flex items-center gap-2 text-xs text-gray-400 shrink-0">
             {provider && (
               <>
@@ -373,6 +378,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
                 busy={busy}
                 onStop={onStop}
                 onOpenUrl={onOpenUrl}
+                onOpenCitation={onOpenCitation}
               />
             );
           })}
@@ -1191,6 +1197,7 @@ function WebChatAnswersPanel({
 }: {
   state: NonNullable<ChatMessage['webChat']>;
   onOpenUrl?: (url: string, title?: string) => void;
+  onOpenCitation?: (citation:Citation) => void;
 }) {
   const [collapsed, setCollapsed] = useState(true);
   const [hovered, setHovered] = useState<{
@@ -1382,8 +1389,10 @@ function MessageBubble({
   busy,
   onStop,
   onOpenUrl,
+  onOpenCitation,
 }: {
   message: ChatMessage;
+  onOpenCitation?: (citation:Citation) => void;
   conversationId: string;
   previousUserMessage?: ChatMessage;
   isError: boolean;
@@ -1439,6 +1448,7 @@ function MessageBubble({
           <div className="text-gray-200 whitespace-pre-wrap text-sm leading-relaxed">{message.content}</div>
         ) : (
           <>
+            {message.knowledge&&message.completion?.status==='complete'&&<div className="text-xs text-emerald-300 mb-2">{message.knowledge.origin==='validated_cache'?'历史问答复用':message.knowledge.origin==='local_generated'?'本地资料回答':'在线回答'}</div>}
             {message.autoRoute && <AutoRouteBadge info={message.autoRoute} />}
             {message.research && <ResearchPanel info={message.research} />}
             <div className="select-text [&_*]:select-text">
@@ -1453,6 +1463,7 @@ function MessageBubble({
             {message.webChat && (
               <WebChatAnswersPanel state={message.webChat} onOpenUrl={onOpenUrl} />
             )}
+            {message.knowledge&&<KnowledgeCitations citations={message.knowledge.citations} onOpen={citation=>onOpenCitation?.(citation)}/>}
             {message.sources && message.sources.length > 0 && (
               <SourcesList sources={message.sources} />
             )}

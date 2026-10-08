@@ -43,9 +43,12 @@ class KnowledgeService:
         return deps
 
     def preview(self,request):
-        config=self.settings(); event=threading.Event(); budget=Budget(config['local_timeout_seconds'],event)
+        config=self.settings();event=self._events.setdefault(request['request_id'],threading.Event());budget=Budget(config['local_timeout_seconds'],event)
+        self.store.update_request(request['request_id'],stage='retrieval',trace=[{'stage':'retrieval','status':'running'}])
         scope=effective_scope(self.store,request.get('source_ids',[]),config['selected_source_ids'])
-        return self.retriever.retrieve(request['question'],scope,budget)
+        candidates=self.retriever.retrieve(request['question'],scope,budget)
+        self.store.update_request(request['request_id'],stage='preview',trace=[{'stage':'preview','status':'done','candidate_count':len(candidates)}])
+        return candidates
 
     def query(self,request): return self._query(request)
 

@@ -117,3 +117,17 @@ def test_pending_chat_index_restored_after_crash(tmp_path):
         assert store.job(job)['status']=='done'
         assert store.get_source(sid).status=='indexed'
     finally: imports.close()
+
+
+def test_enabling_collection_does_not_import_existing_history(tmp_path):
+    from local_knowledge.runtime import Runtime
+    from local_knowledge.config import default_config
+    from local_knowledge.chat_sync import turn_hash
+    config=default_config();config['enabled']=True
+    completion={'status':'complete','kind':'api','finished_at':(time.time()-100)*1000,'effective_constraints':'','origin_hash':turn_hash('old','old answer',[],'')}
+    state=[{'id':'c','messages':[{'id':'u','role':'user','content':'old'},{'id':'a','role':'assistant','content':'old answer','completion':completion}]}]
+    runtime=Runtime(tmp_path,lambda:config,lambda:state)
+    try:
+        runtime.sync_after_save(state)
+        assert runtime.store.list_sources()==[]
+    finally:runtime.close()

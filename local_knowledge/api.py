@@ -12,6 +12,7 @@ from .contracts import QueryResult, UploadItem, Source, Chunk, Position
 from .model_clients import Budget, Cancelled, LocalTimeout, ModelUnavailable
 from .store import StoreUnavailable
 from .parsers import ParseError
+from .ingest import check_file_freshness
 
 
 def validate_query(value):
@@ -113,7 +114,7 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
     def upload():
         _,imp,*_=components();job_id=request.form.get('job_id','');paths=json.loads(request.form.get('relative_paths','[]'));files=request.files.getlist('files')
         if not isinstance(paths,list) or len(paths)!=len(files) or any(not isinstance(x,str) for x in paths): raise ValueError('Relative paths must correspond to upload files')
-        items=[UploadItem(path,file.stream) for path,file in zip(paths,files)]
+        items=[UploadItem(path,file.stream,encoding=request.form.get('encoding') or None) for path,file in zip(paths,files)]
         try: job=imp.append_upload(job_id,items,request.form.get('final')=='true',request.form.get('batch_id'))
         except ValueError as exc:
             if 'Batch ID' in str(exc): return jsonify(error=str(exc)),409
@@ -148,6 +149,19 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
 
     @bp.post('/query/<request_id>/cancel')
     def query_cancel(request_id): return jsonify(ok=True,cancelled=components()[0].cancel(request_id))
+
+    @bp.post('/preview')
+    def preview():
+        data=validate_query(request.get_json(silent=True));s,*_=components()
+        try:candidates=s.preview(data)
+        except Cancelled:return jsonify(request_id=data['request_id'],candidates=[],cancelled=True)
+        except (ModelUnavailable,LocalTimeout):return jsonify(error='本地检索服务不可用或超时'),503
+        results=[]
+        for candidate in candidates:
+            source=s.store.get_source(candidate.chunk.source_id)
+            results.append({'chunk_id':candidate.chunk.id,'source_id':source.id,'source_kind':source.kind,'title':source.title,'revision':source.revision,
+                'locator':source.locator,'position':asdict(candidate.chunk.position),'quote':candidate.chunk.text,'score':candidate.score})
+        return jsonify(request_id=data['request_id'],candidates=results)
     @bp.get('/requests/<request_id>')
     def progress(request_id):
         result=components()[0].request_status(request_id)
@@ -159,9 +173,12 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
         source=source_or_404(source_id)
         revision=request.args.get('revision',type=int)
         if revision is None: raise ValueError('revision is required')
+        if not check_file_freshness(source):
+            components()[0].store.invalidate_source(source_id,status='stale');return jsonify(error='source_changed'),409
         if source.revision!=revision or source.status in ('stale','pending'): return jsonify(error='source_changed'),409
         units=source.metadata.get('units') or [{'text':c.text,'position':asdict(c.position)} for c in components()[0].store.revision_chunks(source_id,revision)]
-        return jsonify(source_id=source_id,revision=revision,text='\n'.join(x['text'] for x in units),units=units)
+        separator='' if units and all(x['position']['kind']=='lines' for x in units) else '\n'
+        return jsonify(source_id=source_id,revision=revision,text=separator.join(x['text'] for x in units),units=units)
 
     @bp.post('/record')
     def record():

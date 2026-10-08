@@ -3,6 +3,7 @@ import hashlib
 import ipaddress
 import json
 import math
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -90,5 +91,6 @@ def request_fingerprint(request: dict, effective_scope) -> str:
 
 
 def model_fingerprint(config: dict, dimension: int | None = None) -> str:
+    policy=hashlib.sha256(Path(__file__).with_name('matching.py').read_bytes()).hexdigest()
     return stable_hash({'roles': {k: config[k] for k in ('embedding_endpoint', 'rerank_endpoint', 'qa_endpoint')},
-                        'dimension': dimension, 'verifier_version': 'evidence-v1'})
+                        'dimension': dimension, 'verifier_version': policy,'retrieval':{k:config[k] for k in ('vector_top_k','rerank_top_k')}})

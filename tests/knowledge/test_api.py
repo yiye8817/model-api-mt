@@ -60,6 +60,23 @@ def test_source_content_requires_current_revision(api):
     assert client.get('/api/knowledge/sources/manual/content').status_code==400
 
 
+def test_citation_view_detects_changed_original_file(api,tmp_path):
+    from local_knowledge.ingest import file_source
+    from local_knowledge.contracts import Chunk
+    client,store,c,imports=api
+    path=tmp_path/'original.md';path.write_text('A 保修三年')
+    source=file_source(path,tmp_path);store.upsert_pending(source,[Chunk('file',text='A 保修三年')]);store.activate_revision(source.id,1)
+    path.write_text('A 保修两年')
+    assert client.get(f'/api/knowledge/sources/{source.id}/content?revision=1').status_code==409
+
+
+def test_uncalibrated_preview_never_generates_an_answer(api):
+    client,store,c,imports=api;c['evaluation_profile_id']=''
+    response=client.post('/api/knowledge/preview',json=request())
+    assert response.status_code==200 and len(response.json['candidates'])==1
+    assert 'answer' not in response.json
+
+
 def test_knowledge_disabled_does_not_import_chroma(tmp_path,monkeypatch):
     import builtins
     from flask import Flask

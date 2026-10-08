@@ -1,5 +1,7 @@
 """Lazy wiring: importing Flask never requires Chroma or document packages."""
 import threading
+import time
+import json
 from pathlib import Path
 
 from .config import default_config, stable_hash, validate_config
@@ -39,7 +41,7 @@ class Runtime:
             evaluations=EvaluationRunner(service,self.store,imports.jobs)
             self._components=(service,imports,evaluations,sync);self._fingerprint=fingerprint
             if config['enabled'] and not self._recovered:
-                sync.sync_snapshot(self.conversations(),collect=config['collect_api_chats'])
+                sync.sync_snapshot(self.conversations(),collect=False)
                 imports.recover();self._recovered=True
             return self._components
 
@@ -52,7 +54,7 @@ class Runtime:
         marker=self.data_dir/'sync-pending'
         try:
             service,imports,evaluations,sync=self.components()
-            sync.sync_snapshot(conversations,collect=bool(config.get('enabled') and config.get('collect_api_chats')))
+            sync.sync_snapshot(conversations,collect=bool(config.get('enabled') and config.get('collect_api_chats')),collection_after=self.collection_after)
             marker.unlink(missing_ok=True)
         except Exception:
             self.data_dir.mkdir(parents=True,exist_ok=True);marker.write_text('reconcile persisted conversations before answering')
@@ -63,3 +65,17 @@ class Runtime:
 
     def close(self):
         if self._components: self._components[1].close()
+
+    @property
+    def collection_after(self):
+        marker=self.data_dir/'collection-start.json'
+        try:return json.loads(marker.read_text())['api_after']
+        except (OSError,ValueError,KeyError):
+            self.data_dir.mkdir(parents=True,exist_ok=True,mode=0o700)
+            value=time.time()*1000;marker.write_text(json.dumps({'api_after':value}));return value
+
+    def on_settings_saved(self,previous,current):
+        if current.get('enabled') and (not previous.get('enabled') or current.get('collect_api_chats') and not previous.get('collect_api_chats')):
+            self.data_dir.mkdir(parents=True,exist_ok=True,mode=0o700)
+            (self.data_dir/'collection-start.json').write_text(json.dumps({'api_after':time.time()*1000}))
+            self._recovered=False

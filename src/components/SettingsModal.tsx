@@ -9,14 +9,16 @@ import type {
   ModelRolesSettings, ModelRoleId, ModelEndpointsSettings, ModelEndpointId,
   ModelRoleBinding, ModelEndpointBinding,
 } from '../types';
+import KnowledgeSettings, {localKnowledgeDefaults} from './KnowledgeSettings';
 
 interface Props {
+  initialTab?: Tab;
   visible: boolean;
   onClose: () => void;
   onSaved?: (s: AppSettings) => void;
 }
 
-type Tab = 'model' | 'search' | 'roles';
+type Tab = 'model' | 'search' | 'roles' | 'knowledge';
 
 const ROLE_META: { id: ModelRoleId; label: string; desc: string }[] = [
   { id: 'intent',         label: '基础意图分析模型', desc: '解析用户输入的意图（参考 yitu.txt），是「自动选模型」流程的入口。建议用快、便宜、稳定的模型。' },
@@ -62,7 +64,7 @@ const PARAM_DOCS: Record<string, string> = {
   system_prompt: '全局 system 提示，每次发送会自动注入到 messages 头部（前端如果已经有 system 消息则不会覆盖）。',
 };
 
-export default function SettingsModal({ visible, onClose, onSaved }: Props) {
+export default function SettingsModal({ visible, onClose, onSaved, initialTab = 'model' }: Props) {
   const [tab, setTab] = useState<Tab>('model');
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [providers, setProviders] = useState<WebSearchProviderInfo[]>([]);
@@ -94,11 +96,11 @@ export default function SettingsModal({ visible, onClose, onSaved }: Props) {
 
   useEffect(() => {
     if (visible) {
-      setTab('model');
+      setTab(initialTab);
       setTestResult(null);
       void refresh();
     }
-  }, [visible, refresh]);
+  }, [visible, refresh, initialTab]);
 
   const handleSave = useCallback(async () => {
     if (!settings) return;
@@ -201,6 +203,7 @@ export default function SettingsModal({ visible, onClose, onSaved }: Props) {
             { id: 'model', label: '模型参数', icon: Sliders },
             { id: 'roles', label: '默认模型', icon: Cpu },
             { id: 'search', label: 'Web 搜索', icon: Globe2 },
+            { id: 'knowledge', label: '本地知识', icon: Cpu },
           ] as const).map(t => {
             const I = t.icon;
             return (
@@ -231,6 +234,8 @@ export default function SettingsModal({ visible, onClose, onSaved }: Props) {
               onChange={(p) => setSettings({ ...settings, model_params: p })}
               onReset={() => handleResetSection('model_params')}
             />
+          ) : tab === 'knowledge' ? (
+            <KnowledgeSettings value={settings.local_knowledge||localKnowledgeDefaults()} onChange={value=>setSettings({...settings,local_knowledge:value})}/>
           ) : tab === 'roles' ? (
             <ModelRolesTab
               roles={settings.model_roles}

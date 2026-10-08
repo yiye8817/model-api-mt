@@ -1,5 +1,27 @@
 import type { CompletedTurn, KnowledgeQueryRequest, KnowledgeQueryResult } from './knowledgeTypes';
 
+export async function knowledgeJson<T>(url:string,body?:unknown,method=body===undefined?'GET':'POST'):Promise<T> {
+  const response=await fetch(url,{method,headers:body===undefined?undefined:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  const data=await response.json();if(!response.ok)throw new KnowledgeHttpError(response.status,data.error||'本地知识操作失败');return data as T;
+}
+
+export async function uploadKnowledgeFiles(files:File[],onJobId:(id:string)=>void,purpose='knowledge',encoding=''):Promise<string> {
+  if(files.length>2000)throw new Error('一次最多导入 2,000 个文件');
+  if(files.some(file=>file.size>20*1024*1024))throw new Error('单个文件不能超过 20 MiB');
+  const {job_id}=await knowledgeJson<{job_id:string}>('/api/knowledge/import',{kind:'upload',purpose});onJobId(job_id);
+  const batches:File[][]=[];let batch:File[]=[],size=0;
+  for(const file of files){if(size+file.size>40*1024*1024&&batch.length){batches.push(batch);batch=[];size=0;}batch.push(file);size+=file.size;}if(batch.length)batches.push(batch);
+  const send=async(group:File[],id:string,final:boolean)=>{
+    const data=new FormData();data.set('job_id',job_id);data.set('batch_id',id);data.set('final',String(final));data.set('encoding',encoding);
+    data.set('relative_paths',JSON.stringify(group.map(f=>f.webkitRelativePath||f.name)));for(const f of group)data.append('files',f,f.name);
+    const r=await fetch('/api/knowledge/upload',{method:'POST',body:data});
+    if(r.status===413&&group.length>1){for(let i=0;i<group.length;i++)await send([group[i]],`${id}-small-${i}`,final&&i===group.length-1);return;}
+    if(!r.ok){const result=await r.json().catch(()=>({}));throw new KnowledgeHttpError(r.status,result.error||'上传失败，可选择较小批次重试');}
+  };
+  for(let i=0;i<batches.length;i++)await send(batches[i],`${job_id}-${i}`,i===batches.length-1);
+  return job_id;
+}
+
 export class KnowledgeHttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }

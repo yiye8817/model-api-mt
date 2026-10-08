@@ -25,7 +25,7 @@ function installBackend(hasProvider=true,options:{enabled?:boolean;decision?:'hi
     if(url==='/api/knowledge/query'&&options.decision==='miss')return Response.json({request_id:body.request_id,decision:'miss',reason:'empty_index',answer:null,citations:[],trace:[],local_model:'local',duration_ms:1,answer_origin:null});
     if(url==='/api/knowledge/query')return Response.json({request_id:body.request_id,decision:'hit',reason:'',answer:'A 型号保修三年',citations:[{source_id:'manual',source_kind:'document',title:'手册',chunk_id:'chunk',revision:1,locator:{kind:'file',path:'/fixture/manual.md'},position:{kind:'lines',start_line:1,end_line:1},quote:'A 型号保修三年'}],trace:[],local_model:'local',duration_ms:1,answer_origin:'local_generated'});
     if(url==='/api/chat'&&(options.decision==='miss'||options.enabled===false)){
-      const data='data: '+JSON.stringify({choices:[{delta:{content:'在线回答'},finish_reason:options.terminal===false?null:'stop'}]})+'\n\n'+(options.terminal===false?'':'data: [DONE]\n\n');
+      const data='data: '+JSON.stringify({choices:[{delta:{content:'这是在线模型的回答'},finish_reason:options.terminal===false?null:'stop'}]})+'\n\n'+(options.terminal===false?'':'data: [DONE]\n\n');
       return new Response(data,{headers:{'Content-Type':'text/event-stream'}});
     }
     if(['/api/auto-route','/api/chat','/api/research/plan'].includes(url))throw new Error('Online path must not run on a local hit');
@@ -88,7 +88,7 @@ it('real App local hit bypasses selected web targets and synthesis',async()=>{
 it('a local miss uses the original API target exactly once',async()=>{
   const b=installBackend(true,{decision:'miss'});render(<App/>);await screen.findByText('本地优先');
   fireEvent.change(screen.getByLabelText('消息'),{target:{value:'question'}});fireEvent.click(screen.getByRole('button',{name:'发送消息'}));
-  await screen.findByText('在线回答');
+  await screen.findByText('这是在线模型的回答');
   const online=b.calls.filter(c=>c.url==='/api/chat');expect(online).toHaveLength(1);
   expect(online[0].body?.baseUrl).toBe('http://fixture/v1');
   expect(document.querySelectorAll('[data-message-role="user"]')).toHaveLength(1);
@@ -98,7 +98,7 @@ it('a local miss uses the original API target exactly once',async()=>{
 it('disabled local knowledge preserves the existing online path',async()=>{
   const b=installBackend(true,{enabled:false});render(<App/>);await waitFor(()=>expect(screen.getByLabelText('消息')).toBeTruthy());
   fireEvent.change(screen.getByLabelText('消息'),{target:{value:'question'}});fireEvent.click(screen.getByRole('button',{name:'发送消息'}));
-  await screen.findByText('在线回答');
+  await screen.findByText('这是在线模型的回答');
   expect(b.calls.filter(c=>c.url==='/api/knowledge/query')).toHaveLength(0);
   expect(b.calls.filter(c=>c.url==='/api/chat')).toHaveLength(1);
 });
@@ -106,7 +106,7 @@ it('disabled local knowledge preserves the existing online path',async()=>{
 it('a disconnected stream is recorded as partial rather than complete',async()=>{
   const b=installBackend(true,{decision:'miss',terminal:false});render(<App/>);await screen.findByText('本地优先');
   fireEvent.change(screen.getByLabelText('消息'),{target:{value:'question'}});fireEvent.click(screen.getByRole('button',{name:'发送消息'}));
-  await screen.findByText('在线回答');
+  await screen.findByText('这是在线模型的回答');
   await waitFor(()=>expect(b.calls.filter(c=>c.url==='/api/knowledge/record')).toHaveLength(1));
   const turn=b.calls.find(c=>c.url==='/api/knowledge/record')?.body?.turn as {completion:{status:string}};
   expect(turn.completion.status).toBe('partial');

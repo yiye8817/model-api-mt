@@ -152,6 +152,7 @@ class PreparedQuestion:
     kind: str = 'qa'
     constraints: list[dict] = field(default_factory=list)
     context_basis: list[dict] = field(default_factory=list)
+    system_constraints: str = ''
 
 
 @dataclass

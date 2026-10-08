@@ -23,6 +23,9 @@ import { DEFAULT_MODEL_CHAT_SITES } from './lib/modelChatSites';
 import { cancelKnowledge, recordKnowledge, turnHash } from './lib/knowledgeApi';
 import { checkLocalFirst, createRequestGuard, knowledgeReasons } from './lib/knowledgeRouting';
 import type { Completion, KnowledgeQueryRequest } from './lib/knowledgeTypes';
+import type { Citation } from './lib/knowledgeTypes';
+import KnowledgePanel from './components/KnowledgePanel';
+import KnowledgeSourceViewer from './components/KnowledgeSourceViewer';
 import {
   acquireDesktopOverlay,
   detectWebChatSite,
@@ -97,6 +100,9 @@ export default function App() {
   const [pluginEnabled, setPluginEnabled] = useState(false);
   const [showLocalHub, setShowLocalHub] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showKnowledge,setShowKnowledge]=useState(false);
+  const [knowledgeCitation,setKnowledgeCitation]=useState<Citation|null>(null);
+  const [settingsInitialTab,setSettingsInitialTab]=useState<'model'|'knowledge'>('model');
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const settingsRef = useRef<AppSettings | null>(null);
   settingsRef.current = settings;
@@ -422,11 +428,11 @@ export default function App() {
   // Electron：各类弹层打开期间保持 WebContentsView 隐藏（+ 菜单 / 配置 / 设置等）
   useEffect(() => {
     if (!getDesktop()) return;
-    const overlayOpen = showConfigModal || showLocalHub || showSettings || terminalVisible || showAddMenu || showProjectRunner;
+    const overlayOpen = showConfigModal || showLocalHub || showSettings || showKnowledge || !!knowledgeCitation || terminalVisible || showAddMenu || showProjectRunner;
     if (!overlayOpen) return;
     acquireDesktopOverlay();
     return () => releaseDesktopOverlay();
-  }, [showConfigModal, showLocalHub, showSettings, terminalVisible, showAddMenu, showProjectRunner]);
+  }, [showConfigModal, showLocalHub, showSettings, showKnowledge, knowledgeCitation, terminalVisible, showAddMenu, showProjectRunner]);
 
   // Electron：离开网页标签时卸下 WebContentsView
   useEffect(() => {
@@ -604,6 +610,23 @@ export default function App() {
   const handleSelectConversation = useCallback((id: string) => {
     setState(prev => ({ ...prev, activeConversationId: id }));
   }, [setState]);
+
+  const openKnowledgeCitation=useCallback((citation:Citation)=>{
+    if(citation.locator.kind==='web'&&typeof citation.locator.url==='string'){
+      setShowKnowledge(false);setKnowledgeCitation(null);openWebTab(citation.locator.url,citation.title);return;
+    }
+    const conversationId=String(citation.locator.conversation_id||'');
+    if(conversationId&&stateRef.current.conversations.some(c=>c.id===conversationId)){
+      setShowKnowledge(false);setKnowledgeCitation(null);setActiveCenterTab('provider');handleSelectConversation(conversationId);
+      const messageId=String(citation.locator.assistant_message_id||citation.position.message_id||'');
+      requestAnimationFrame(()=>document.getElementById(`chat-message-${conversationId}-${messageId}`)?.scrollIntoView({block:'center'}));return;
+    }
+    setKnowledgeCitation(citation);
+  },[openWebTab,handleSelectConversation]);
+  useEffect(()=>{
+    const refresh=()=>{void fetch('/api/settings').then(r=>r.json()).then(setSettings).catch(()=>{});};
+    window.addEventListener('knowledge-settings-updated',refresh);return()=>window.removeEventListener('knowledge-settings-updated',refresh);
+  },[]);
 
   const handleDeleteConversation = useCallback((id: string) => {
     setState(prev => ({
@@ -2089,6 +2112,7 @@ export default function App() {
               </button>
             </div>
             <div className="ml-auto flex items-center gap-1 shrink-0">
+              <button onClick={()=>setShowKnowledge(true)} className="px-2 py-1 text-xs text-emerald-300 hover:bg-gray-700 rounded" aria-label="本地知识管理">本地知识</button>
               <button
                 onClick={() => {
                   setFilesPanelOpen(current => {
@@ -2126,6 +2150,8 @@ export default function App() {
                 isLoading={isLoading}
                 localKnowledgeEnabled={settings?.local_knowledge?.enabled}
                 knowledgeProgress={knowledgeProgress}
+                onOpenKnowledge={()=>setShowKnowledge(true)}
+                onOpenCitation={openKnowledgeCitation}
                 streamingContent={streamingContent}
                 injectedInput={injectedForInput?.content ?? null}
                 injectedAttachments={injectedForInput?.attachments}
@@ -2138,7 +2164,7 @@ export default function App() {
                 onPluginRun={handlePluginRun}
                 onPluginChat={handlePluginChat}
                 onPluginReloadCode={handlePluginReloadCode}
-                onOpenSettings={() => setShowSettings(true)}
+                onOpenSettings={() => {setSettingsInitialTab('model');setShowSettings(true);}}
                 isBusy={isLoading || pluginActionBusy}
                 onStop={handleStop}
                 autoRouteEnabled={autoRouteEnabled}
@@ -2517,9 +2543,19 @@ export default function App() {
 
       <SettingsModal
         visible={showSettings}
+        initialTab={settingsInitialTab}
         onClose={() => setShowSettings(false)}
         onSaved={(s) => setSettings(s)}
       />
+
+      {showKnowledge&&<div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-6"><div role="dialog" aria-label="本地资料管理" className="w-full max-w-4xl max-h-[90vh] overflow-auto bg-gray-900 border border-gray-700 rounded-xl p-5">
+        <div className="flex items-center gap-3 mb-4 text-white"><h2 className="flex-1">本地资料管理</h2><button className="text-xs text-emerald-300" onClick={()=>{setShowKnowledge(false);setSettingsInitialTab('knowledge');setShowSettings(true);}}>连接设置</button><button aria-label="关闭资料管理" onClick={()=>setShowKnowledge(false)}>关闭</button></div>
+        <KnowledgePanel onOpenCitation={openKnowledgeCitation}/>
+      </div></div>}
+      {knowledgeCitation&&<div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-6"><div role="dialog" aria-label="查看引用来源" className="max-w-4xl w-full max-h-[90vh] overflow-auto rounded-xl border border-gray-700 bg-gray-900 p-5">
+        <div className="flex mb-4 text-white"><h2 className="flex-1">{knowledgeCitation.title}</h2><button aria-label="关闭引用来源" onClick={()=>setKnowledgeCitation(null)}>关闭</button></div>
+        <KnowledgeSourceViewer sourceId={knowledgeCitation.source_id} revision={knowledgeCitation.revision} position={knowledgeCitation.position}/>
+      </div></div>}
 
       <AgentDialog
         visible={showProjectRunner}

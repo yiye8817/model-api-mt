@@ -3,6 +3,8 @@ import {
   Loader2, ListChecks, RefreshCw, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react';
+import {knowledgeJson} from '../lib/knowledgeApi';
+import {useKnowledgeJobs} from '../hooks/useKnowledgeJobs';
 import {
   boundsFromElement,
   getDesktop,
@@ -561,6 +563,18 @@ function DesktopWebPane({
       void desktop.setBounds(tabId, b);
     }
   }, [active, desktop, hostRef, lastBoundsRef, tabId]);
+  const [importJob,setImportJob]=useState<string|null>(null),[importNote,setImportNote]=useState(''),[importBusy,setImportBusy]=useState(false);
+  const {job:knowledgeJob}=useKnowledgeJobs(importJob);
+  const importVisible=async()=>{
+    setImportBusy(true);setImportNote('正在读取当前可见对话…');
+    try{
+      if(!desktop.importWebConversation)throw new Error('请重启桌面应用后使用对话导入');
+      const snapshot=await desktop.importWebConversation(tabId);
+      if(!snapshot.ok)throw new Error(snapshot.error||'无法读取可见消息');
+      const result=await knowledgeJson<{job_id:string}>('/api/knowledge/web-import',{snapshot});setImportJob(result.job_id);
+      setImportNote(`已读取 ${snapshot.messages.length} 条可见消息；${snapshot.context_complete?'已确认从会话起点覆盖':'历史范围不完整，仅供参考'}。`);
+    }catch(e){setImportNote(e instanceof Error?e.message:'导入失败');}finally{setImportBusy(false);}
+  };
 
   const syncBounds = useCallback(() => {
     const b = boundsFromElement(hostRef.current);
@@ -660,11 +674,13 @@ function DesktopWebPane({
         <button type="button" onClick={goForward} disabled={!canGoForward} className="p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-30" title="前进"><ArrowRight size={13} /></button>
         <WebAddressBar url={url} onNavigate={onNavigate} />
         <span className="text-[10px] text-emerald-500/80 shrink-0">Electron</span>
+        <button type="button" className="text-emerald-300 disabled:opacity-50" disabled={importBusy} onClick={()=>void importVisible()}>导入当前可见对话</button>
         <button type="button" onClick={() => void savePage()} disabled={!onSavePage} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-gray-400 hover:text-amber-300 hover:bg-gray-800 disabled:opacity-40" title="保存网页到 + 菜单"><BookmarkPlus size={12} /><span>保存</span></button>
         <button type="button" onClick={reload} className="p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800" title="刷新"><RefreshCw size={13} /></button>
         <button type="button" onClick={openExternal} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-gray-400 hover:text-amber-300 hover:bg-gray-800" title="在系统浏览器中打开"><ExternalLink size={12} /><span>外部打开</span></button>
       </div>
       <WebPageAssistant tabId={tabId} url={url} title={title} desktop={desktop} selectionRequest={selectionRequest} providers={providers} defaultProviderId={defaultProviderId} onOpenUrl={onOpenUrl} />
+      {importNote&&<div className="px-3 py-1 text-xs text-emerald-300">{importNote}{knowledgeJob&&` ${knowledgeJob.phase} · 成功 ${knowledgeJob.succeeded} · 跳过 ${knowledgeJob.skipped} · 失败 ${knowledgeJob.failed}`}</div>}
       {/* WebContentsView 盖在此区域上；点击此处可在卸下后重新显示 */}
       <div ref={hostRef} data-electron-web-host="" className="flex-1 min-h-0 relative bg-[#0b1120]" onPointerDown={showWeb}>
         {!active && <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-600">后台标签</div>}

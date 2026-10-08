@@ -105,7 +105,7 @@ class Store:
 
     def invalidate_source(self, source_id, status='deleted'):
         with self._lock, self.connection as conn:
-            conn.execute('UPDATE sources SET enabled=0,status=? WHERE id=?', (status, source_id))
+            conn.execute('UPDATE sources SET enabled=CASE WHEN ?="deleted" THEN 0 ELSE enabled END,status=? WHERE id=?', (status,status,source_id))
             conn.execute("UPDATE chunks SET status='obsolete' WHERE source_id=?", (source_id,))
             self._invalidate_cache(conn, source_id)
 

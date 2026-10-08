@@ -45,7 +45,7 @@ class ChatSynchronizer:
             system_constraints=completion.get('effective_constraints',''),completion=completion,
             provider_id=assistant.get('providerId',conversation.get('providerId','')),model=assistant.get('model',conversation.get('model','')),source_kind='api_chat')
 
-    def sync_snapshot(self,conversations,collect=True,force=False,conversation_ids=None):
+    def sync_snapshot(self,conversations,collect=True,force=False,conversation_ids=None,collection_after=None):
         with self._lock:
             self._snapshot=conversations; message_map={}; pairs=[]
             for conversation in conversations:
@@ -71,6 +71,9 @@ class ChatSynchronizer:
             for turn in pairs:
                 sid=source_id(turn)
                 collect_turn=collect and (not conversation_ids or turn['conversation_id'] in conversation_ids)
+                if collect_turn and not force and collection_after is not None:
+                    finished=turn['completion'].get('finished_at',0)
+                    collect_turn=type(finished) in (int,float) and finished>=collection_after
                 if collect_turn or sid in persisted or self.store.get_source(sid):
                     persisted[sid]=turn
                     with self.store.connection as conn: conn.execute('INSERT OR REPLACE INTO qa_records VALUES(?,?,?)',(sid,sid,dumps(turn)))

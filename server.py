@@ -2973,6 +2973,7 @@ def api_settings_get():
 @app.route('/api/settings', methods=['POST'])
 def api_settings_set():
     data = request.json or {}
+    previous_knowledge = _load_settings()['local_knowledge']
     if not isinstance(data, dict):
         return jsonify({'error': 'Settings must be an object'}), 400
     if 'local_knowledge' in data:
@@ -2982,6 +2983,11 @@ def api_settings_set():
         except (ValueError, TypeError) as exc:
             return jsonify({'error': str(exc)}), 400
     cur = _save_settings(data)
+    if 'local_knowledge' in data:
+        try:
+            _knowledge_runtime.on_settings_saved(previous_knowledge, cur['local_knowledge'])
+        except Exception as exc:
+            logger.warning('Knowledge collection configuration deferred (%s)', type(exc).__name__)
     return jsonify({'ok': True, 'settings': cur})
 
 
