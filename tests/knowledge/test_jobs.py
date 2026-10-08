@@ -50,3 +50,15 @@ def test_cancel_keeps_revision_unpublished(tmp_path):
         assert store.visible_chunks()==[]
         assert (root/'x.txt').read_text()=='sample'
     finally: manager.close()
+
+
+def test_missing_selected_file_does_not_scan_its_parent(tmp_path):
+    from local_knowledge.ingest import ImportManager
+    from local_knowledge.store import Store
+    root=tmp_path/'selected';root.mkdir();(root/'unselected.txt').write_text('private adjacent data')
+    store=Store(tmp_path/'data');manager=ImportManager(store)
+    try:
+        job=wait_job(manager,manager.enqueue({'kind':'paths','roots':[str(root/'missing.txt')]}))
+        assert job['failed']==1 and job['succeeded']==0
+        assert store.list_sources()==[]
+    finally:manager.close()

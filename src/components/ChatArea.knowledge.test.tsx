@@ -3,7 +3,7 @@ import { render,screen,waitFor,fireEvent,act } from '@testing-library/react';
 import ChatArea from './ChatArea';
 import App from '../App';
 import type { AppState,AppSettings } from '../types';
-import type { DesktopBridge } from '../lib/desktopBridge';
+import type { DesktopBridge,WebChatProgressEvent } from '../lib/desktopBridge';
 
 function config():AppSettings {
   const role={url:'http://127.0.0.1:8011',protocol:'llama_chat' as const,model:'local',model_revision:'1',allow_lan:false};
@@ -128,4 +128,36 @@ it('stopping a local query discards a late hit without sending online',async()=>
   await act(async()=>resolve(Response.json({request_id:id,decision:'hit',reason:'',answer:'迟到答案',citations:[{source_id:'s'}],trace:[],local_model:'local',duration_ms:1,answer_origin:'local_generated'})));
   await screen.findByText('⏹️ 已停止');expect(screen.queryByText('迟到答案')).toBeNull();
   expect(b.calls.filter(c=>c.url==='/api/chat')).toHaveLength(0);
+});
+
+it('a complete web candidate is recorded when synthesis fails and each web send is counted',async()=>{
+  const backend=installBackend(true,{decision:'miss'});const original=backend.fetcher.getMockImplementation()!;
+  backend.fetcher.mockImplementation(async(input,init)=>{
+    if(String(input)==='/api/chat'){
+      backend.calls.push({url:'/api/chat',body:JSON.parse(String(init?.body))});
+      return new Response('synthesis unavailable',{status:503});
+    }
+    return original(input,init);
+  });
+  let report:((event:WebChatProgressEvent)=>void)|undefined;
+  const object:Record<string,unknown>={isDesktop:true,
+    onWebChatProgress:(listener:typeof report)=>{report=listener;return ()=>{report=undefined;};},
+    webChat:vi.fn(async(id:string,_question:string,_timeout:number,requestId:string)=>{
+      const event={id,requestId,event:'prompt-sent',message:'sent',timestamp:Date.now()};report?.(event);
+      return {ok:true,content:'B 型号保修三年',model:'web-fixture',site:'deepseek',progressEvents:[event],
+        contextSnapshot:{context_complete:true,messages:[{role:'user',content:'这里讨论 B 型号'},{role:'assistant',content:'好的'}]},
+        validation:{complete:true}};
+    })};
+  window.desktop=new Proxy(object,{get(target,key){if(key in target)return target[String(key)];const fn=String(key).startsWith('on')?()=>()=>{}:async()=>({ok:true});target[String(key)]=fn;return fn;}}) as unknown as DesktopBridge;
+  render(<App/>);await screen.findByText('本地优先');
+  fireEvent.click(screen.getByTitle('配置网页 AI 群聊'));fireEvent.click(screen.getByText('DeepSeek'));
+  if(!screen.queryAllByRole('checkbox').length)fireEvent.click(screen.getByTitle('配置网页 AI 群聊'));
+  const enabled=screen.getAllByRole('checkbox').find(el=>(el.parentElement?.textContent||'').includes('启用'))!;
+  fireEvent.click(enabled);fireEvent.change(screen.getByLabelText('消息'),{target:{value:'保修期多久？'}});
+  fireEvent.click(screen.getByRole('button',{name:'发送消息'}));
+  await screen.findByText(/网页回答已返回，但综合失败/);
+  await waitFor(()=>expect(backend.calls.some(c=>c.url==='/api/knowledge/record'&&(c.body?.turn as {source_kind?:string})?.source_kind==='web_chat')).toBe(true));
+  const raw=backend.calls.find(c=>c.url==='/api/knowledge/record'&&(c.body?.turn as {source_kind?:string})?.source_kind==='web_chat')?.body?.turn as {context:{content:string}[];completion:{status:string}};
+  expect(raw.context[0].content).toBe('这里讨论 B 型号');expect(raw.completion.status).toBe('complete');
+  expect(backend.calls.some(c=>c.url==='/api/knowledge/record'&&Array.isArray(c.body?.online_calls)&&c.body!.online_calls.length>0)).toBe(true);
 });

@@ -11,6 +11,8 @@ class Runtime:
     def __init__(self,data_dir,settings,conversations):
         self.data_dir=Path(data_dir);self.settings=settings;self.conversations=conversations
         self._store=None;self._components=None;self._fingerprint=None;self._lock=threading.RLock();self._recovered=False
+        from .service import RequestRegistry
+        self._requests=RequestRegistry()
 
     @property
     def store(self):
@@ -33,7 +35,7 @@ class Runtime:
             from .evaluation import EvaluationRunner
             models=ModelClients(config);vectors=VectorIndex(self.data_dir,stable_hash(config['embedding_endpoint']),0)
             retriever=Retriever(self.store,vectors,models)
-            service=KnowledgeService(self.store,retriever,models,self.settings)
+            service=KnowledgeService(self.store,retriever,models,self.settings,registry=self._requests)
             if self._components:
                 imports=self._components[1];sync=self._components[3]
             else:

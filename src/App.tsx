@@ -20,7 +20,7 @@ import { useBackendState } from './hooks/useBackendState';
 import { hostOfUrl, isLikelyFrameBlocked, normalizeHttpUrl } from './lib/webFrame';
 import { browserFileUrl, fileTargetName, isBrowserOpenableFile, resolveFileTarget } from './lib/fileTargets';
 import { DEFAULT_MODEL_CHAT_SITES } from './lib/modelChatSites';
-import { cancelKnowledge, recordKnowledge, turnHash } from './lib/knowledgeApi';
+import { cancelKnowledge, recordKnowledge, recordKnowledgeOnlineCall, turnHash } from './lib/knowledgeApi';
 import { checkLocalFirst, createRequestGuard, knowledgeReasons } from './lib/knowledgeRouting';
 import type { Completion, KnowledgeQueryRequest } from './lib/knowledgeTypes';
 import type { Citation } from './lib/knowledgeTypes';
@@ -950,9 +950,16 @@ export default function App() {
         }
 
         let removeWebChatProgress: (() => void) | undefined;
+        const countedWebSends=new Set<string>();
+        const countWebSend=(tabId:string,model?:string)=>{
+          if(countedWebSends.has(tabId))return;countedWebSends.add(tabId);
+          void recordKnowledgeOnlineCall(requestId,`${requestId}:web:${tabId}`,model).catch(()=>{});
+        };
         if (typeof desktopForWebChat.onWebChatProgress === 'function') {
           removeWebChatProgress = desktopForWebChat.onWebChatProgress(event => {
-            if(event.requestId!==requestId||controller.signal.aborted)return;
+            if(event.requestId!==requestId)return;
+            if(event.event==='prompt-sent')countWebSend(event.id);
+            if(controller.signal.aborted)return;
             const current = progress.get(event.id);
             if (!current) return;
             progress.set(event.id, {
@@ -981,6 +988,7 @@ export default function App() {
             result = { ok: false, error: error?.message || String(error) };
           }
           const current = progress.get(target.id);
+          if(result.progressEvents?.some(event=>event.event==='prompt-sent'))countWebSend(target.id,result.model);
           if(controller.signal.aborted)return {target,result:{ok:false,cancelled:true} as WebChatResult};
           const combinedEvents = [...(current?.events || []), ...(result.progressEvents || [])];
           const seenEvents = new Set<string>();
@@ -1030,6 +1038,15 @@ export default function App() {
           timestamp: Date.now(),
           webChat: { status: 'synthesizing', aggregator, answers: structuredAnswers() },
         });
+
+        for(const item of successes){
+          if(item.result.partial||!item.result.validation?.complete)continue;
+          const context=(item.result.contextSnapshot?.messages||[]).map(m=>({role:m.role,content:m.content}));
+          const metadata=await completeMetadata(item.result.content||'','web','complete',context,'');
+          await collect({id:assistantId,role:'assistant',content:item.result.content||'',timestamp:Date.now(),model:item.result.model||'unknown',...metadata},'web_chat',
+            {kind:'web',url:item.result.url||item.target.url,site:item.result.site||item.target.site,tab_id:item.target.id},context,item.result.contextSnapshot?.context_complete===true);
+        }
+        if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
 
         const candidateBlock = successes.map(({ target, result }, index) =>
           `[候选回答 ${index + 1}：${targetLabel(target, result)}${result.model ? ` / ${result.model}` : ''}${result.partial ? ' / 抓取超时，内容可能不完整' : ''}]\n${String(result.content).slice(0, 24000)}`
@@ -1099,13 +1116,6 @@ export default function App() {
         });
         void collect({id:assistantId,role:'assistant',content:finalContent,timestamp:Date.now(),providerId:aggregationProvider.id,model:aggregationProvider.selectedModel,...webMetadata},'web_synthesis',undefined,history,
           successes.every(item=>item.result.contextSnapshot?.context_complete===true));
-        for(const item of successes){
-          if(item.result.partial||!item.result.validation?.complete)continue;
-          const context=(item.result.contextSnapshot?.messages||[]).map(m=>({role:m.role,content:m.content}));
-          const metadata=await completeMetadata(item.result.content||'','web','complete',context,'');
-          void collect({id:assistantId,role:'assistant',content:item.result.content||'',timestamp:Date.now(),model:item.result.model||'unknown',...metadata},'web_chat',
-            {kind:'web',url:item.result.url||item.target.url,site:item.result.site||item.target.site,tab_id:item.target.id},context,item.result.contextSnapshot?.context_complete===true);
-        }
         return;
       }
 

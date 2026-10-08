@@ -13,6 +13,8 @@ from .model_clients import Budget, Cancelled, LocalTimeout, ModelUnavailable
 from .store import StoreUnavailable
 from .parsers import ParseError
 from .ingest import check_file_freshness
+from .chat_sync import turn_hash
+from .text import keyword_tokens
 
 
 def validate_query(value):
@@ -124,7 +126,7 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
     @bp.post('/sources/<source_id>/refresh')
     def refresh(source_id):
         source=source_or_404(source_id);s,imp,ev,cs=components()
-        if source.locator.get('kind')=='file': job=imp.enqueue({'kind':'paths','roots':[source.locator['path']]})
+        if source.locator.get('kind')=='file': job=imp.enqueue({'kind':'paths','roots':[source.locator['root']],'explicit_files':[source.locator['path']]})
         else:
             job=s.store.create_job('reindex',{'source_id':source_id,'revision':source.revision})
             def run(job_id):
@@ -183,9 +185,17 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
     @bp.post('/record')
     def record():
         data=request.get_json(silent=True) or {};s,imp,ev,cs=components()
-        sid=cs.record(data.get('turn'))
-        for call in data.get('online_calls',[]):
-            s.store.record_online_call(data['turn']['completion'].get('request_id',''),call['call_id'],call.get('kind','web'),call.get('model','unknown'))
+        turn=data.get('turn');calls=data.get('online_calls',[])
+        request_id=turn.get('completion',{}).get('request_id','') if isinstance(turn,dict) else data.get('request_id','')
+        if not isinstance(calls,list) or any(not isinstance(call,dict) or not isinstance(call.get('call_id'),str) or not 1<=len(call['call_id'])<=300 or not isinstance(call.get('kind','web'),str) or not isinstance(call.get('model','unknown'),str) for call in calls):
+            raise ValueError('Invalid online call records')
+        if calls and (not isinstance(request_id,str) or not 1<=len(request_id)<=200):raise ValueError('request_id is required for online calls')
+        if turn is None and not calls:raise ValueError('A completed turn or online call records are required')
+        sid=cs.record(turn) if turn is not None else None
+        for call in calls:s.store.record_online_call(request_id,call['call_id'],call.get('kind','web'),call.get('model','unknown'))
+        if calls:
+            if not s.store.request(request_id):s.store.update_request(request_id)
+            if sid is None:return jsonify(online_model_requests=s.store.request(request_id)['online_model_requests'])
         instance=runtime_instance()
         if instance: cs.sync_snapshot(instance.conversations(),collect=False)
         source=s.store.get_source(sid)
@@ -216,16 +226,22 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
         if p.scheme not in ('http','https') or not p.hostname or p.username or p.password: raise ValueError('Invalid web source URL')
         job=s.store.create_job('web',{})
         def run(job_id):
-            items=[];user=None
+            items=[];user=None;prior=[];before_user=[]
             for message in snapshot['messages']:
                 if not isinstance(message,dict) or message.get('role') not in ('user','assistant') or not isinstance(message.get('content'),str):
                     items.append({'status':'skipped','reason':'unknown_message_role'});continue
-                if message['role']=='user': user=message;continue
+                if message['role']=='user':
+                    user=message;before_user=list(prior);prior.append({'role':'user','content':message['content']});continue
+                prior.append({'role':'assistant','content':message['content']})
                 if not user or not message.get('complete'):
                     items.append({'status':'skipped','reason':'incomplete_or_unpaired'});continue
                 sid=stable_hash(['visible_web',url,user.get('id'),message.get('id')]);text='问题：'+user['content']+'\n回答：'+message['content']
-                source=Source(sid,kind='web_chat',title=user['content'][:100],locator={'kind':'web','url':url,'site':snapshot.get('site','unknown'),'page_conversation_id':snapshot.get('conversation_id')},content_hash=stable_hash(text),context_complete=bool(snapshot.get('context_complete')),nature='historical_model_answer',metadata={'model':snapshot.get('model') or 'unknown','visible_only':True})
-                rev=s.store.upsert_pending(source,[Chunk('visible',text=text,position=Position(kind='message',message_id=message.get('id')))])
+                constraints=snapshot.get('system_constraints','')
+                metadata={'model':snapshot.get('model') or 'unknown','visible_only':True,'question':user['content'],'answer':message['content'],
+                    'context':before_user,'system_constraints':constraints,'completion':{'status':'complete','kind':'web',
+                        'origin_hash':turn_hash(user['content'],message['content'],before_user,constraints)}}
+                source=Source(sid,kind='web_chat',title=user['content'][:100],locator={'kind':'web','url':url,'site':snapshot.get('site','unknown'),'page_conversation_id':snapshot.get('conversation_id')},content_hash=stable_hash([metadata,snapshot.get('context_complete')]),context_complete=snapshot.get('context_complete') is True,nature='historical_model_answer',metadata=metadata)
+                rev=s.store.upsert_pending(source,[Chunk('visible',text=text,keyword_text=' '.join(keyword_tokens(text)),position=Position(kind='message',message_id=message.get('id')))])
                 if source.context_complete: s.retriever.index_revision(sid,rev,Budget(120,imp.jobs.event(job_id)))
                 else:
                     with s.store.connection as conn: conn.execute("UPDATE sources SET status='reference_only' WHERE id=?",(sid,))

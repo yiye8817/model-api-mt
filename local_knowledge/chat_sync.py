@@ -47,14 +47,15 @@ class ChatSynchronizer:
 
     def sync_snapshot(self,conversations,collect=True,force=False,conversation_ids=None,collection_after=None):
         with self._lock:
-            self._snapshot=conversations; message_map={}; pairs=[]
+            self._snapshot=conversations; message_map={}; pairs=[];contexts={}
             for conversation in conversations:
                 if not isinstance(conversation,dict) or not conversation.get('id'): continue
                 messages=conversation.get('messages',[]); user=None; prior=[]; before_user=[]
                 for message in messages:
                     if not isinstance(message,dict) or not message.get('id'): continue
                     message_map[(conversation['id'],message['id'])]=message
-                    if message.get('role')=='user': user=message;before_user=list(prior)
+                    if message.get('role')=='user':
+                        user=message;before_user=list(prior);contexts[(conversation['id'],message['id'])]=list(prior)
                     elif message.get('role')=='assistant' and user:
                         turn=self._turn_from_messages(conversation,user,message,before_user)
                         if turn and turn['question'] and turn['answer']: pairs.append(turn)
@@ -84,21 +85,30 @@ class ChatSynchronizer:
                 user=message_map.get((turn['conversation_id'],turn['user_message_id']))
                 assistant=message_map.get((turn['conversation_id'],turn['assistant_message_id']))
                 if not user or not assistant: continue
-                if user.get('content')!=turn['question']: continue
+                def invalidate():
+                    if source and source.status!='deleted':self.store.invalidate_source(sid,status='stale')
+                current_context=contexts.get((turn['conversation_id'],turn['user_message_id']),[])
+                if 'workbench_context' not in turn:
+                    turn['workbench_context']=current_context
+                    with self.store.connection as conn:conn.execute('UPDATE qa_records SET body=? WHERE id=?',(dumps(turn),sid))
+                if turn['workbench_context']!=current_context or user.get('content')!=turn['question']:
+                    invalidate();continue
                 kind=turn.get('source_kind','api_chat')
                 if kind=='web_chat':
                     web=assistant.get('webChat',{})
-                    if web.get('status')=='stopped': continue
+                    if web.get('status')=='stopped':invalidate();continue
                     candidate=next((a for a in web.get('answers',[]) if a.get('tabId')==turn.get('locator',{}).get('tab_id')),None)
-                    if not candidate or candidate.get('content')!=turn['answer'] or candidate.get('partial') or candidate.get('status')!='done' or not candidate.get('validation',{}).get('complete'): continue
-                elif assistant.get('content')!=turn['answer']: continue
+                    if not candidate or candidate.get('content')!=turn['answer'] or candidate.get('partial') or candidate.get('status')!='done' or not candidate.get('validation',{}).get('complete'):
+                        invalidate();continue
+                elif assistant.get('content')!=turn['answer'] or kind=='web_synthesis' and (assistant.get('webChat',{}).get('status')=='stopped' or assistant.get('completion',{}).get('status') in ('stopped','error','partial')):
+                    invalidate();continue
                 self._publish(sid,turn,force_turn)
 
     def _publish(self,sid,turn,force):
         completion=turn['completion']; digest=turn_hash(turn['question'],turn['answer'],turn['context'],turn['system_constraints'])
         eligible=completion.get('status')=='complete' and completion.get('kind') in ('api','web') and completion.get('origin_hash')==digest
         eligible=eligible and turn.get('context_complete',True)
-        content_hash=stable_hash({'turn':digest,'model':turn.get('model',''),'eligible':eligible})
+        content_hash=stable_hash({'turn':digest,'model':turn.get('model',''),'eligible':eligible,'workbench_context':turn.get('workbench_context',[])})
         old=self.store.get_source(sid)
         if old and old.content_hash==content_hash and old.status not in ('deleted','stale'):
             if old.status!='pending' or any(j['payload'].get('source_id')==sid and j['payload'].get('revision')==old.revision for j in self.store.unfinished_jobs()): return
@@ -109,6 +119,8 @@ class ChatSynchronizer:
             context_complete=bool(eligible),nature='historical_model_answer',completed_at=completion.get('finished_at',0)/1000,
             metadata={'question':turn['question'],'answer':turn['answer'],'context':turn['context'],'system_constraints':turn['system_constraints'],
                       'model':turn.get('model','unknown'),'provider_id':turn.get('provider_id',''),'candidate_ids':turn.get('candidate_ids',[])})
+        source.metadata['workbench_context']=turn.get('workbench_context',[])
+        source.metadata['completion']=dict(completion)
         text=f"问题：{turn['question']}\n回答：{turn['answer']}"
         chunk=Chunk('answer',text=text,keyword_text=' '.join(keyword_tokens(text)),position=Position(kind='message',message_id=turn['assistant_message_id'],start_char=0,end_char=len(text)))
         revision=self.store.upsert_pending(source,[chunk])

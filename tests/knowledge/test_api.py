@@ -161,3 +161,49 @@ def test_actual_online_chat_and_auxiliary_sends_are_counted(server_client):
         with server.app.test_request_context('/api/auto-route',headers={'X-Request-ID':'online-q'}):
             assert server._llm_chat_full(model.url+'/v1','','fixture','system','question')[0]=='answer'
     assert runtime.store.request('online-q')['online_model_requests']==2
+
+
+def test_refresh_nested_file_preserves_original_source_identity(api,tmp_path):
+    from local_knowledge.ingest import file_source
+    from local_knowledge.contracts import Chunk
+    client,store,c,imports=api
+    root=tmp_path/'documents';(root/'nested').mkdir(parents=True);path=root/'nested'/'file.txt';path.write_text('old')
+    source=file_source(path,root);store.upsert_pending(source,[Chunk('file',text='old')]);store.activate_revision(source.id,1)
+    path.write_text('new')
+    response=client.post(f'/api/knowledge/sources/{source.id}/refresh',json={});assert response.status_code==202
+    imports.jobs.queue.join()
+    assert store.get_source(source.id).revision==2
+    assert len([s for s in store.list_sources() if s.locator.get('path')==str(path)])==1
+
+
+def test_visible_web_import_preserves_previous_context_and_revisions(api):
+    client,store,c,imports=api
+    messages=[{'id':'u1','role':'user','content':'这里只讨论 B 型号','complete':True},
+        {'id':'a1','role':'assistant','content':'好的','complete':True},
+        {'id':'u2','role':'user','content':'保修期多久？','complete':True},
+        {'id':'a2','role':'assistant','content':'三年','complete':True}]
+    snapshot={'url':'https://example.test/c/one','context_complete':True,'system_constraints':'中文简答','messages':messages}
+    # The fixture's vector transport is intentionally absent; only publication is under test.
+    from unittest.mock import patch
+    from local_knowledge.retrieval import Retriever
+    with patch.object(Retriever,'index_revision',lambda self,sid,rev,budget:store.activate_revision(sid,rev)):
+        assert client.post('/api/knowledge/web-import',json={'snapshot':snapshot}).status_code==202
+        imports.jobs.queue.join()
+        source=next(s for s in store.list_sources() if s.title=='保修期多久？')
+        assert source.metadata['context']==[{'role':m['role'],'content':m['content']} for m in messages[:2]]
+        assert source.metadata['question']=='保修期多久？'
+        assert source.metadata['system_constraints']=='中文简答'
+        assert source.metadata['completion']['status']=='complete'
+        messages[0]['content']='这里只讨论 A 型号'
+        client.post('/api/knowledge/web-import',json={'snapshot':snapshot});imports.jobs.queue.join()
+        assert store.get_source(source.id).revision==source.revision+1
+
+
+def test_web_send_counts_do_not_require_a_completed_answer(api):
+    client,store,c,imports=api
+    payload={'request_id':'web-q','online_calls':[{'call_id':'web-q:tab-1','kind':'web','model':'unknown'}]}
+    first=client.post('/api/knowledge/record',json=payload)
+    second=client.post('/api/knowledge/record',json=payload)
+    assert first.status_code==second.status_code==200
+    assert client.get('/api/knowledge/requests/web-q').json['online_model_requests']==1
+    assert not store.connection.execute('SELECT 1 FROM qa_records').fetchone()

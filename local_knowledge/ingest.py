@@ -120,30 +120,35 @@ class ImportManager:
         with self._lock:
             job=self.snapshot(job_id)
             if job['cancel_requested']: raise ValueError('Upload cancelled')
-            paths=[safe_relative_path(f.relative_path) for f in files]
-            raw_files=[]; size=0
+            payload=job['payload']; old=list(payload.get('files',[])); rejected=list(payload.get('rejected_items',[]))
+            incoming=[];identities=[];size=0;known={x['relative_path'] for x in old}
             for item in files:
-                raw=item.stream.read(20*1024*1024+1)
-                if len(raw)>20*1024*1024: raise ParseError('file_too_large')
-                size+=len(raw); raw_files.append(raw)
-                if size>40*1024*1024: raise ParseError('upload_batch_too_large')
-            if size>40*1024*1024: raise ParseError('upload_batch_too_large')
-            payload=job['payload']; old=payload.get('files',[]); hashes=payload.get('batches',{})
-            digest=stable_hash([(str(p),hashlib.sha256(r).hexdigest()) for p,r in zip(paths,raw_files)])
+                raw=item.stream.read(20*1024*1024+1);size+=len(raw)
+                if size>40*1024*1024:raise ParseError('upload_batch_too_large')
+                reason=None;status='failed';path=None
+                try:path=safe_relative_path(item.relative_path)
+                except ValueError:
+                    reason='sensitive_name' if SENSITIVE.match(Path(item.relative_path).name) else 'invalid_relative_path'
+                    if reason=='sensitive_name':status='skipped'
+                if not reason and len(raw)>20*1024*1024:reason='file_too_large'
+                if not reason and len(old)+len(incoming)>=2000:reason='file_count_limit'
+                if not reason and str(path) in known:reason='duplicate_upload_path'
+                identities.append((item.relative_path,hashlib.sha256(raw).hexdigest(),item.encoding))
+                if reason:rejected.append({'path':item.relative_path,'status':status,'reason':reason})
+                else:incoming.append((path,raw,item));known.add(str(path))
+            hashes=dict(payload.get('batches',{}));digest=stable_hash(identities)
             if batch_id and batch_id in hashes:
-                if hashes[batch_id]!=digest: raise ValueError('Batch ID already has different content')
+                if hashes[batch_id]!=digest:raise ValueError('Batch ID already has different content')
                 return job
-            if job['status']!='uploading': raise ValueError('Upload already finalized')
-            if len(old)+len(files)>2000: raise ValueError('file_count_limit')
-            if len(set(str(p) for p in paths))!=len(paths) or any(str(p) in {x['relative_path'] for x in old} for p in paths): raise ValueError('Duplicate upload path')
-            folder=self.store.data_dir/'imports'/job_id; folder.mkdir(parents=True,exist_ok=True)
-            for ordinal,(path,raw,item) in enumerate(zip(paths,raw_files,files),len(old)):
-                destination=folder/(str(ordinal)+path.suffix)
-                destination.write_bytes(raw)
+            if job['status']!='uploading':raise ValueError('Upload already finalized')
+            folder=self.store.data_dir/'imports'/job_id;folder.mkdir(parents=True,exist_ok=True)
+            for path,raw,item in incoming:
+                destination=folder/(str(len(old))+path.suffix);destination.write_bytes(raw)
                 old.append({'path':str(destination),'relative_path':str(path),'encoding':item.encoding})
-            if batch_id: hashes[batch_id]=digest
-            payload.update(files=old,batches=hashes)
-            job=self.store.update_job(job_id,payload=payload,total=len(old))
+            if batch_id:hashes[batch_id]=digest
+            payload.update(files=old,batches=hashes,rejected_items=rejected)
+            job=self.store.update_job(job_id,payload=payload,total=len(old)+len(rejected),items=rejected,
+                failed=sum(x['status']=='failed' for x in rejected),skipped=sum(x['status']=='skipped' for x in rejected))
             if final:
                 self.store.update_job(job_id,status='queued',phase='queued')
                 self.jobs.submit(job_id,self._run_upload)
@@ -154,6 +159,8 @@ class ImportManager:
         files=[]; items=[]
         for value in job['payload']['roots']:
             selected=Path(value).expanduser().resolve()
+            if not selected.exists() or not (selected.is_file() or selected.is_dir()):
+                items.append({'path':str(selected),'status':'failed','reason':'selected_path_unavailable'});continue
             root=selected if selected.is_dir() else selected.parent
             explicit=[selected] if selected.is_file() else [Path(x).expanduser().resolve() for x in job['payload'].get('explicit_files',[]) if Path(x).expanduser().resolve().is_relative_to(root)]
             result=scan_root(root,explicit)
@@ -166,7 +173,7 @@ class ImportManager:
 
     def _run_upload(self,job_id):
         job=self.snapshot(job_id); event=self._events.setdefault(job_id,threading.Event())
-        self._process(job_id,job['payload'].get('files',[]),[],event,uploaded=True)
+        self._process(job_id,job['payload'].get('files',[]),list(job['payload'].get('rejected_items',[])),event,uploaded=True)
 
     def _process(self,job_id,files,items,event,uploaded):
         self.store.update_job(job_id,status='running',phase='parsing',total=len(files)+len(items))

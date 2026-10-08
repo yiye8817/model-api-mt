@@ -6,11 +6,14 @@ export async function knowledgeJson<T>(url:string,body?:unknown,method=body===un
 }
 
 export async function uploadKnowledgeFiles(files:File[],onJobId:(id:string)=>void,purpose='knowledge',encoding=''):Promise<string> {
-  if(files.length>2000)throw new Error('一次最多导入 2,000 个文件');
-  if(files.some(file=>file.size>20*1024*1024))throw new Error('单个文件不能超过 20 MiB');
-  const {job_id}=await knowledgeJson<{job_id:string}>('/api/knowledge/import',{kind:'upload',purpose});onJobId(job_id);
+  const rejected_items:{path:string;status:string;reason:string}[]=[];
+  const accepted=files.filter((file,index)=>{
+    const reason=index>=2000?'file_count_limit':file.size>20*1024*1024?'file_too_large':null;
+    if(reason){rejected_items.push({path:file.webkitRelativePath||file.name,status:'failed',reason});return false;}return true;
+  });
+  const {job_id}=await knowledgeJson<{job_id:string}>('/api/knowledge/import',{kind:'upload',purpose,rejected_items});onJobId(job_id);
   const batches:File[][]=[];let batch:File[]=[],size=0;
-  for(const file of files){if(size+file.size>40*1024*1024&&batch.length){batches.push(batch);batch=[];size=0;}batch.push(file);size+=file.size;}if(batch.length)batches.push(batch);
+  for(const file of accepted){if(size+file.size>40*1024*1024&&batch.length){batches.push(batch);batch=[];size=0;}batch.push(file);size+=file.size;}if(batch.length)batches.push(batch);
   const send=async(group:File[],id:string,final:boolean)=>{
     const data=new FormData();data.set('job_id',job_id);data.set('batch_id',id);data.set('final',String(final));data.set('encoding',encoding);
     data.set('relative_paths',JSON.stringify(group.map(f=>f.webkitRelativePath||f.name)));for(const f of group)data.append('files',f,f.name);
@@ -18,6 +21,7 @@ export async function uploadKnowledgeFiles(files:File[],onJobId:(id:string)=>voi
     if(r.status===413&&group.length>1){for(let i=0;i<group.length;i++)await send([group[i]],`${id}-small-${i}`,final&&i===group.length-1);return;}
     if(!r.ok){const result=await r.json().catch(()=>({}));throw new KnowledgeHttpError(r.status,result.error||'上传失败，可选择较小批次重试');}
   };
+  if(!batches.length)await send([],`${job_id}-empty`,true);
   for(let i=0;i<batches.length;i++)await send(batches[i],`${job_id}-${i}`,i===batches.length-1);
   return job_id;
 }
@@ -45,6 +49,10 @@ export async function recordKnowledge(turn: CompletedTurn, onlineCalls?: {call_i
   if(turn.completion.kind==='local'||turn.completion.kind==='workflow')return;
   const response=await fetch('/api/knowledge/record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({turn,online_calls:onlineCalls||[]})});
   if(!response.ok)throw new KnowledgeHttpError(response.status,'问答资料记录失败');
+}
+
+export async function recordKnowledgeOnlineCall(requestId:string,callId:string,model='unknown'):Promise<void> {
+  await knowledgeJson('/api/knowledge/record',{request_id:requestId,online_calls:[{call_id:callId,kind:'web',model}]});
 }
 
 function canonical(value:unknown):unknown {

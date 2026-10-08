@@ -90,7 +90,9 @@ def test_upload_traversal_rejected(tmp_path,name):
     manager=ImportManager(Store(tmp_path/'data'))
     try:
         job=manager.enqueue({'kind':'upload','purpose':'knowledge'})
-        with pytest.raises(ValueError): manager.append_upload(job,[UploadItem(name,io.BytesIO(b'x'))],False)
+        manager.append_upload(job,[UploadItem(name,io.BytesIO(b'x'))],True)
+        manager.jobs.queue.join()
+        assert manager.snapshot(job)['failed']==1
         assert not (tmp_path/'escape.txt').exists()
     finally: manager.close()
 
@@ -113,3 +115,32 @@ def test_file_changed_with_same_size_and_mtime(tmp_path):
     stat=path.stat()
     path.write_text('other'); os.utime(path,ns=(stat.st_atime_ns,stat.st_mtime_ns))
     assert not check_file_freshness(source)
+
+
+def test_upload_records_bad_items_and_imports_good_ones(tmp_path):
+    from local_knowledge.ingest import ImportManager
+    from local_knowledge.store import Store
+    from local_knowledge.contracts import UploadItem
+    from tests.knowledge.test_jobs import wait_job
+    store=Store(tmp_path/'data');manager=ImportManager(store,lambda sid,rev,b:store.activate_revision(sid,rev))
+    try:
+        job_id=manager.enqueue({'kind':'upload','purpose':'knowledge'})
+        manager.append_upload(job_id,[UploadItem('good.txt',io.BytesIO(b'allowed')),UploadItem('../bad.txt',io.BytesIO(b'bad')),UploadItem('.env',io.BytesIO(b'secret'))],True,'batch')
+        job=wait_job(manager,job_id)
+        assert job['succeeded']==1 and job['failed']+job['skipped']==2
+        assert len(store.visible_chunks())==1
+    finally:manager.close()
+
+
+def test_retried_upload_batch_is_idempotent_with_rejected_items(tmp_path):
+    from local_knowledge.ingest import ImportManager
+    from local_knowledge.store import Store
+    from local_knowledge.contracts import UploadItem
+    manager=ImportManager(Store(tmp_path/'data'))
+    try:
+        job=manager.enqueue({'kind':'upload'})
+        def items():return [UploadItem('good.txt',io.BytesIO(b'good')),UploadItem('../bad.txt',io.BytesIO(b'bad'))]
+        manager.append_upload(job,items(),False,'batch')
+        manager.append_upload(job,items(),False,'batch')
+        assert manager.snapshot(job)['total']==2 and len(manager.snapshot(job)['payload']['files'])==1
+    finally:manager.close()

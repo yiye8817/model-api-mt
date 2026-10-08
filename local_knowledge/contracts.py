@@ -51,6 +51,7 @@ class Chunk:
     ordinal: int = 0
     continuation_group: str | None = None
     status: str = 'pending'
+    source_context: dict = field(default_factory=dict)
 
 
 @dataclass

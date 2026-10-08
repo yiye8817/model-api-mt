@@ -3,7 +3,7 @@ import threading
 import time
 from dataclasses import asdict, replace
 
-from .config import request_fingerprint, stable_hash
+from .config import request_fingerprint, stable_hash, model_fingerprint
 from .contracts import QueryResult, Citation, Position
 from .ingest import check_file_freshness
 from .matching import Matcher, EvidenceError
@@ -11,10 +11,16 @@ from .model_clients import Budget, Cancelled, LocalTimeout, ModelUnavailable
 from .retrieval import effective_scope
 
 
+class RequestRegistry:
+    def __init__(self):
+        self.events={};self.active=set();self.lock=threading.RLock()
+
+
 class KnowledgeService:
-    def __init__(self,store,retriever,models,settings):
+    def __init__(self,store,retriever,models,settings,registry=None):
         self.store=store; self.retriever=retriever; self.models=models; self.settings=settings
-        self.matcher=Matcher(models); self._events={}; self._lock=threading.RLock(); self._active=set()
+        self.matcher=Matcher(models);self.registry=registry or RequestRegistry()
+        self._events=self.registry.events;self._active=self.registry.active;self._lock=self.registry.lock
 
     def cancel(self,request_id):
         with self._lock:
@@ -32,14 +38,19 @@ class KnowledgeService:
         for source_id in deps:
             s=self.store.get_source(source_id)
             if not s.context_complete: raise EvidenceError('insufficient_evidence')
+            if s.nature=='historical_model_answer' and (any(key not in s.metadata for key in ('question','context','system_constraints','completion')) or s.metadata['completion'].get('status')!='complete'):
+                raise EvidenceError('insufficient_evidence')
             if not check_file_freshness(s):
                 self.store.invalidate_source(source_id,status='stale'); raise EvidenceError('source_changed' if final else 'stale_source')
             budget.check()
         if re.search(r'最新|当前|现在|今日|今天|\blatest\b|\bcurrently\b|\btoday\b',question,re.I):
             if any(self.store.get_source(sid).valid_until is None for sid in deps): raise EvidenceError('stale_source')
-        sources=[self.store.get_source(sid) for sid in deps]
-        if all(s.nature=='historical_model_answer' for s in sources) and not re.search(r'(之前|上次|历史|曾经).*(说|回答|对话|聊)|模型.*(说|回答)|what.*(said|conversation|answer)',question,re.I):
-            raise EvidenceError('insufficient_evidence')
+        for chunk in chunks:
+            source=self.store.get_source(chunk.source_id)
+            chunk.source_context={'nature':source.nature,'kind':source.kind,'context':source.metadata.get('context',[]),
+                'workbench_context':source.metadata.get('workbench_context',[]),'system_constraints':source.metadata.get('system_constraints',''),
+                'question':source.metadata.get('question',''),'completion':source.metadata.get('completion',{}),
+                'context_complete':source.context_complete,'completed_at':source.completed_at,'valid_until':source.valid_until}
         return deps
 
     def preview(self,request):
@@ -59,7 +70,21 @@ class KnowledgeService:
             previous=self.store.request(request_id)
             if previous and previous.get('identity') and previous['identity']!=identity: raise ValueError('Request ID already used for different input')
             if previous and previous.get('result'):
-                value=previous['result']; value['citations']=[Citation(**{**c,'position':Position(**c['position'])}) for c in value['citations']]
+                value=previous['result']
+                if value.get('decision')=='hit':
+                    try:
+                        if not config['enabled']:raise EvidenceError('disabled')
+                        profile=self.store.profile(config['evaluation_profile_id'])
+                        if not profile or not all(profile.get(k) for k in ('passed','real_models','reviewed')) or profile.get('fingerprint')!=model_fingerprint(config,profile.get('dimension',self.models.dimension)) or previous.get('execution_fingerprint')!=profile.get('fingerprint'):
+                            raise EvidenceError('uncalibrated')
+                        scope=effective_scope(self.store,request.get('source_ids',[]),config['selected_source_ids'])
+                        chunks=[self.store.get_chunk(c['chunk_id']) for c in value['citations']]
+                        if any(c is None or c.source_id not in scope for c in chunks):raise EvidenceError('source_changed')
+                        self._check_sources(chunks,request['question'],Budget(config['local_timeout_seconds'],threading.Event()),final=True)
+                    except EvidenceError as exc:
+                        value=QueryResult(request_id,'miss',exc.reason).to_dict()
+                        self.store.update_request(request_id,stage='miss',decision='miss',result=value)
+                value['citations']=[Citation(**{**c,'position':Position(**c['position'])}) for c in value['citations']]
                 return QueryResult(**value)
             if request_id in self._active: raise ValueError('Request ID is already running')
             event=self._events.setdefault(request_id,threading.Event())
@@ -133,11 +158,13 @@ class KnowledgeService:
         except EvidenceError as exc: result=QueryResult(request_id,'miss',exc.reason,trace=trace)
         except ModelUnavailable: result=QueryResult(request_id,'miss','invalid_answer' if stage in ('generate','verify') else 'local_unavailable',trace=trace)
         finally:
-            if result is not None:
-                if event.is_set(): result=QueryResult(request_id,'cancelled','cancelled',trace=trace)
-                result.duration_ms=round((time.monotonic()-started)*1000,2)
-                for step in trace: step['status']='done'
-                trace.append({'stage':result.decision,'status':'done','reason':result.reason,'duration_ms':result.duration_ms})
-                self.store.update_request(request_id,stage=result.decision,decision=result.decision,trace=trace,duration_ms=result.duration_ms,result=result.to_dict())
-            with self._lock: self._active.discard(request_id)
+            with self._lock:
+                if result is not None:
+                    current=self.store.request(request_id)
+                    if event.is_set() or current and current.get('cancelled'): result=QueryResult(request_id,'cancelled','cancelled',trace=trace)
+                    result.duration_ms=round((time.monotonic()-started)*1000,2)
+                    for step in trace: step['status']='done'
+                    trace.append({'stage':result.decision,'status':'done','reason':result.reason,'duration_ms':result.duration_ms})
+                    self.store.update_request(request_id,stage=result.decision,decision=result.decision,trace=trace,duration_ms=result.duration_ms,result=result.to_dict(),execution_fingerprint=self.models.fingerprint)
+                self._active.discard(request_id)
         return result

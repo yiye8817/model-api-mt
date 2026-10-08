@@ -131,3 +131,20 @@ def test_enabling_collection_does_not_import_existing_history(tmp_path):
         runtime.sync_after_save(state)
         assert runtime.store.list_sources()==[]
     finally:runtime.close()
+
+
+@pytest.mark.parametrize('change',['question','answer','stopped'])
+def test_web_synthesis_provenance_change_invalidates_source(tmp_path,change):
+    store,imports,sync,turn,state=setup_sync(tmp_path)
+    try:
+        turn['source_kind']='web_synthesis';turn['completion']['kind']='web'
+        state[0]['messages'][1]['completion']=copy.deepcopy(turn['completion'])
+        state[0]['messages'][1]['webChat']={'status':'done','answers':[]}
+        sid=sync.record(turn);sync.sync_snapshot(state);finish_queue(imports)
+        assert store.dependencies_current({sid:1})
+        if change=='question':state[0]['messages'][0]['content']='B 的保修期？'
+        elif change=='answer':state[0]['messages'][1]['content']='edited answer'
+        else:state[0]['messages'][1]['webChat']['status']='stopped'
+        sync.sync_snapshot(state)
+        assert not store.dependencies_current({sid:1})
+    finally:imports.close()
