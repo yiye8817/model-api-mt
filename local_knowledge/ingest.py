@@ -126,6 +126,7 @@ class ImportManager:
                 raw=item.stream.read(20*1024*1024+1)
                 if len(raw)>20*1024*1024: raise ParseError('file_too_large')
                 size+=len(raw); raw_files.append(raw)
+                if size>40*1024*1024: raise ParseError('upload_batch_too_large')
             if size>40*1024*1024: raise ParseError('upload_batch_too_large')
             payload=job['payload']; old=payload.get('files',[]); hashes=payload.get('batches',{})
             digest=stable_hash([(str(p),hashlib.sha256(r).hexdigest()) for p,r in zip(paths,raw_files)])
@@ -219,3 +220,11 @@ class ImportManager:
             self.store.update_job(job['id'],status='queued',phase='queued')
             if job['kind']=='paths': self.jobs.submit(job['id'],self._run_paths)
             elif job['kind']=='upload': self.jobs.submit(job['id'],self._run_upload)
+            elif job['kind'] in ('chat_index','reindex') and self.index_revision:
+                def resume_index(job_id):
+                    payload=self.store.job(job_id)['payload']
+                    self.index_revision(payload['source_id'],payload['revision'],Budget(120,self.jobs.event(job_id)))
+                    self.store.update_job(job_id,status='done',phase='done',completed=1,succeeded=1)
+                self.jobs.submit(job['id'],resume_index)
+            elif job['kind']=='evaluation':
+                self.store.update_job(job['id'],status='failed',phase='interrupted',result={'error':'Interrupted evaluation; use a fresh held-out dataset before activation'})

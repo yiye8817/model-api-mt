@@ -3069,6 +3069,7 @@ def save_state(state):
                         os.remove(os.path.join(CONVERSATIONS_DIR, name))
                     except Exception as e:
                         logger.warning(f"Could not remove deleted conversation file {name}: {e}")
+        _knowledge_sync_after_save(state.get('conversations', []))
         return True
     except Exception as e:
         logger.error(f"Failed to save state: {e}")
@@ -4263,6 +4264,7 @@ def chat_proxy():
     retry_codes = (429, 503)
 
     def do_request(stream_req=False):
+        _knowledge_count_online('chat', model)
         return http_requests.post(url, json=payload, headers=headers, stream=stream_req, timeout=120)
 
     try:
@@ -4806,6 +4808,7 @@ def _llm_chat_full(base_url, api_key, model, system_prompt, user_prompt, max_tok
             payload = _build_anthropic_payload(
                 model, messages, stream=False, max_tokens=max_tokens, temperature=temperature,
             )
+            _knowledge_count_online('auxiliary', model)
             resp = http_requests.post(url, json=payload, headers=headers, timeout=180)
             resp.raise_for_status()
             data = _anthropic_json_to_openai(resp.json(), model)
@@ -4825,6 +4828,7 @@ def _llm_chat_full(base_url, api_key, model, system_prompt, user_prompt, max_tok
                 if conflict:
                     raise ValueError(f"request_options cannot override reserved fields: {sorted(conflict)}")
                 payload.update(request_options)
+            _knowledge_count_online('auxiliary', model)
             resp = http_requests.post(url, json=payload, headers=headers, timeout=180)
             resp.raise_for_status()
             data = resp.json()
@@ -9532,6 +9536,40 @@ def alias_status_stream():
 # ============================================================
 # Main Entry Point
 # ============================================================
+from pathlib import Path as _KnowledgePath
+from local_knowledge.runtime import Runtime as _KnowledgeRuntime
+from local_knowledge.api import create_blueprint as _knowledge_blueprint
+
+_knowledge_runtime = _KnowledgeRuntime(
+    _KnowledgePath(DATA_DIR) / 'local-knowledge',
+    lambda: _load_settings()['local_knowledge'],
+    lambda: load_state()['conversations'],
+)
+app.register_blueprint(_knowledge_blueprint(runtime=lambda: _knowledge_runtime))
+
+
+def _knowledge_sync_after_save(conversations):
+    try:
+        _knowledge_runtime.sync_after_save(conversations)
+    except Exception as exc:
+        logger.warning('Local knowledge synchronization deferred (%s)', type(exc).__name__)
+
+
+def _knowledge_count_online(kind, model):
+    if not has_request_context():
+        return
+    request_id = request.headers.get('X-Request-ID')
+    if not request_id or not _load_settings()['local_knowledge']['enabled']:
+        return
+    try:
+        store = _knowledge_runtime.store
+        if store.request(request_id) is None:
+            store.update_request(request_id, stage='online')
+        store.record_online_call(request_id, uuid.uuid4().hex, kind, model)
+    except Exception as exc:
+        logger.warning('Local knowledge request accounting unavailable (%s)', type(exc).__name__)
+
+
 if __name__ == '__main__':
     PORT = int(os.environ.get('PORT', 8765))
     HOST = os.environ.get('HOST', '0.0.0.0')
