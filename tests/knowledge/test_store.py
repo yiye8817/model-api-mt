@@ -22,6 +22,7 @@ def test_pending_revision_not_answerable(tmp_path):
     assert store.visible_chunks(['s1']) == []
     assert store.activate_revision('s1', revision)
     assert [c.text for c in store.visible_chunks(['s1'])] == ['A 型号保修三年']
+    assert [c.status for c in store.visible_chunks(['s1'])] == ['indexed']
 
 
 def test_repeated_hash_keeps_revision(tmp_path):

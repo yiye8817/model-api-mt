@@ -116,13 +116,13 @@ class Store:
     def visible_chunks(self, source_ids=None):
         if source_ids == []:
             return []
-        sql = "SELECT c.body FROM chunks c JOIN sources s ON s.id=c.source_id WHERE s.enabled=1 AND s.status='indexed' AND c.status='indexed' AND c.revision=s.revision"
+        sql = "SELECT c.body,c.status FROM chunks c JOIN sources s ON s.id=c.source_id WHERE s.enabled=1 AND s.status='indexed' AND c.status='indexed' AND c.revision=s.revision"
         args = []
         if source_ids is not None:
             sql += ' AND s.id IN (' + ','.join('?' for _ in source_ids) + ')'
             args.extend(source_ids)
         sql += ' ORDER BY c.source_id,c.ordinal'
-        return [chunk_from_dict(json.loads(row['body'])) for row in self.connection.execute(sql, args)]
+        return [chunk_from_dict({**json.loads(row['body']), 'status': row['status']}) for row in self.connection.execute(sql, args)]
 
     def get_chunk(self, chunk_id):
         row = self.connection.execute('SELECT body FROM chunks WHERE id=?', (chunk_id,)).fetchone()
