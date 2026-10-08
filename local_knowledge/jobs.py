@@ -5,12 +5,16 @@ import threading
 class JobQueue:
     def __init__(self,store):
         self.store=store; self.queue=queue.Queue(); self.closed=False
+        self.events={}
         self.thread=threading.Thread(target=self._run,name='local-knowledge-index',daemon=True)
         self.thread.start()
 
     def submit(self,job_id,callback):
         if self.closed: raise RuntimeError('Job queue is closed')
         self.queue.put((job_id,callback))
+
+    def event(self,job_id):
+        return self.events.setdefault(job_id,threading.Event())
 
     def _run(self):
         while True:

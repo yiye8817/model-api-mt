@@ -186,6 +186,10 @@ class EvaluationReport:
     dataset_hash: str = ''
     real_models: bool = False
     reviewed: bool = False
+    threshold: float = 0.0
+    dimension: int | None = None
+    calibration: list[dict] = field(default_factory=list)
+    validation_hash: str = ''
 
     def meets_release_gate(self) -> bool:
         return self.answerable > 0 and self.wrong_hits == 0 and self.correct_hits / self.answerable >= .6

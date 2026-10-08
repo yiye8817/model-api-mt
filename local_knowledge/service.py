@@ -49,7 +49,7 @@ class KnowledgeService:
 
     def query(self,request): return self._query(request)
 
-    def _query(self,request,evaluation_threshold=None):
+    def _query(self,request,evaluation_threshold=None,cancellation=None):
         request_id=request['request_id']; started=time.monotonic(); config=self.settings()
         identity=stable_hash(request)
         with self._lock:
@@ -60,6 +60,9 @@ class KnowledgeService:
                 return QueryResult(**value)
             if request_id in self._active: raise ValueError('Request ID is already running')
             event=self._events.setdefault(request_id,threading.Event())
+            if cancellation is not None:
+                event=cancellation
+                self._events[request_id]=event
             if previous and previous.get('cancelled'): event.set()
             self._active.add(request_id)
             self.store.update_request(request_id,identity=identity)
@@ -77,6 +80,8 @@ class KnowledgeService:
             if not scope: raise EvidenceError('empty_index')
             profile=self.store.profile(config['evaluation_profile_id']) if config['evaluation_profile_id'] else None
             if evaluation_threshold is None:
+                if profile and getattr(self.models,'dimension',None) is None and profile.get('dimension'):
+                    self.models.embed([request['question']],budget)
                 if not profile or not all(profile.get(k) for k in ('passed','real_models','reviewed')) or profile.get('fingerprint')!=self.models.fingerprint:
                     raise EvidenceError('uncalibrated')
                 threshold=profile['threshold']
@@ -100,7 +105,7 @@ class KnowledgeService:
                 chunks=self.retriever.evidence_units(candidates,max(0,token_budget),budget)
                 if not chunks: raise EvidenceError('insufficient_evidence')
                 self._check_sources(chunks,question.original,budget)
-                transition('matching',candidate_count=len(chunks))
+                transition('matching',candidate_count=len(chunks),score=max(c.score for c in candidates))
                 self.matcher.match_evidence(question,chunks,budget)
                 transition('generate')
                 payload=self.matcher.generate(question,chunks,budget); origin='local_generated'

@@ -88,7 +88,7 @@ def safe_relative_path(value):
 class ImportManager:
     def __init__(self,store,index_revision=None):
         self.store=store; self.index_revision=index_revision; self.jobs=JobQueue(store)
-        self._events={}; self._lock=threading.RLock()
+        self._events=self.jobs.events; self._lock=threading.RLock()
 
     def close(self):
         for event in self._events.values(): event.set()
