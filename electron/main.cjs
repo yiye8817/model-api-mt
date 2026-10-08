@@ -11,6 +11,8 @@ const fs = require('fs');
 const http = require('http');
 const { spawn } = require('child_process');
 const { runWebChat, startNewWebChat, copyLatestAnswerMarkdown, detectSite } = require('./web-chat.cjs');
+const { extractVisibleConversation, WebChatRequests, stopGenerationInPage } = require('./web-conversation.cjs');
+const webChatRequests = new WebChatRequests();
 const {
   buildProjectPrompt, wizardScript, runWebProject, extractMarkdownCodeBlocks,
 } = require('./web-project.cjs');
@@ -201,10 +203,11 @@ function launchDesktopAgent(payload = {}) {
   return { ok: false, error: lastError ? `未能启动终端：${lastError.message}` : '未找到可用的终端模拟器，请手动运行 desktop-agent/run.sh。' };
 }
 
-function createWebChatProgressReporter(sender, id, events) {
+function createWebChatProgressReporter(sender, id, events, requestId) {
   return (event, message, details = {}) => {
     const item = {
       id,
+      requestId,
       event: String(event || 'progress'),
       message: String(message || event || '网页 AI 处理中'),
       timestamp: Date.now(),
@@ -466,6 +469,7 @@ function hideWeb() {
 }
 
 function closeWeb(id) {
+  webChatRequests.cancelTab(id);
   const entry = webTabs.get(id);
   if (!entry) return { ok: true };
   if (activeWebId === id) {
@@ -1253,14 +1257,24 @@ function registerIpc() {
     const entry = webTabs.get(id);
     if (!entry) return { ok: false, error: '网页标签不存在或已关闭' };
     if (!prompt) return { ok: false, error: '问题不能为空' };
+    const requestId = String(payload.requestId || `web-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    let controller;
+    try { controller = webChatRequests.begin(_e.sender.id, id, requestId); }
+    catch (error) { return { ok: false, requestId, error: String(error.message) }; }
+    try {
     const progressEvents = [];
-    const report = createWebChatProgressReporter(_e.sender, id, progressEvents);
+    const report = createWebChatProgressReporter(_e.sender, id, progressEvents, requestId);
+    const contextSnapshot = controller.signal.aborted ? null : await extractVisibleConversation(entry.view);
     report('started', '网页大模型处理开始', { url: entry.view.webContents.getURL() });
     const rawResult = await runWebChat(entry.view, prompt, {
       timeoutMs: payload.timeoutMs,
       onProgress: report,
+      signal: controller.signal,
     });
     rawResult.progressEvents = progressEvents;
+    rawResult.requestId = requestId;
+    rawResult.contextSnapshot = contextSnapshot;
+    if (rawResult.cancelled || controller.signal.aborted) return { ...rawResult, ok: false, cancelled: true };
     const result = await persistWebChatDump(
       id,
       rawResult,
@@ -1285,6 +1299,19 @@ function registerIpc() {
       result.pageSaveError || '',
     );
     return result;
+    } finally { webChatRequests.finish(_e.sender.id, id, requestId); }
+  });
+
+  ipcMain.handle('desktop:import-web-conversation', (_e, payload = {}) => {
+    const entry = webTabs.get(String(payload.id || ''));
+    return entry ? extractVisibleConversation(entry.view) : { ok: false, messages: [], context_complete: false, error: '网页标签已关闭' };
+  });
+  ipcMain.handle('desktop:cancel-web-chat', async (_e, payload = {}) => {
+    const id = String(payload.id || ''), requestId = String(payload.requestId || '');
+    const cancelled = webChatRequests.cancel(_e.sender.id, id, requestId);
+    const entry = webTabs.get(id);
+    if (cancelled && entry) await entry.view.webContents.executeJavaScript(`(${stopGenerationInPage.toString()})()`, true).catch(() => {});
+    return { ok: true, cancelled };
   });
 
   ipcMain.handle('desktop:new-web-chat', async (_e, payload = {}) => {

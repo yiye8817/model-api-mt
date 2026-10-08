@@ -14,6 +14,7 @@ export interface WebChatTarget {
 }
 
 export interface WebChatProgressEvent {
+  requestId?: string;
   id: string;
   event: string;
   message: string;
@@ -22,6 +23,9 @@ export interface WebChatProgressEvent {
 }
 
 export interface WebChatResult {
+  requestId?: string;
+  contextSnapshot?: WebConversationSnapshot | null;
+  cancelled?: boolean;
   ok: boolean;
   site?: WebChatSite;
   title?: string;
@@ -78,7 +82,9 @@ export interface DesktopBridge {
   extractWebSegments: (id: string) => Promise<{ ok: boolean; title?: string; segments?: WebTranslationSegment[]; error?: string }>;
   /** Apply model translations to the loaded page DOM. */
   applyWebTranslations: (id: string, mode: WebTranslationMode, translations: WebTranslation[]) => Promise<{ ok: boolean; applied?: number; error?: string }>;
-  webChat: (id: string, prompt: string, timeoutMs?: number) => Promise<WebChatResult>;
+  webChat: (id: string, prompt: string, timeoutMs?: number, requestId?: string) => Promise<WebChatResult>;
+  importWebConversation: (id: string) => Promise<WebConversationSnapshot>;
+  cancelWebChat: (id: string, requestId: string) => Promise<{ok: boolean; cancelled?: boolean}>;
   /** Open the project wizard inside the native page without hiding it. */
   openWebProjectWizard: (id: string) => Promise<{ ok: boolean; error?: string }>;
   onWebChatProgress: (callback: (event: WebChatProgressEvent) => void) => () => void;
@@ -111,6 +117,14 @@ declare global {
 
 export function getDesktop(): DesktopBridge | null {
   return typeof window !== 'undefined' && window.desktop?.isDesktop ? window.desktop : null;
+}
+
+export interface WebConversationSnapshot {
+  ok: boolean; error?: string; site?: string; url?: string; title?: string; model?: string | null;
+  conversation_id?: string | null; context_complete: boolean;
+  messages: {id: string; role: 'user' | 'assistant'; content: string; complete: boolean; position?: {kind: string; message_id: string}}[];
+  coverage?: {scope: 'visible'; count: number; from_start: boolean; stable_ids: boolean};
+  skipped?: {reason: string}[];
 }
 
 export function isDesktopApp(): boolean {

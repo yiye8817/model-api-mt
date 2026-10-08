@@ -821,7 +821,8 @@ function clickPreparedCopyButtonInPage(marker) {
   return { ok: true };
 }
 
-async function copyLatestAnswerMarkdown(webContents, site, onProgress) {
+async function copyLatestAnswerMarkdown(webContents, site, onProgress, signal) {
+  const checkCancelled = () => { if (signal?.aborted) throw new Error('网页问答已停止'); };
   // Callers may hold either a WebContentsView or its webContents. Normalize
   // here so a view cannot produce the misleading "executeJavaScript is not a
   // function" error during manual project imports.
@@ -842,9 +843,11 @@ async function copyLatestAnswerMarkdown(webContents, site, onProgress) {
     const marker = `__LLM_MANAGER_COPY_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
     let captured = '';
     try {
+      checkCancelled();
       await webContents.executeJavaScript(scriptCall(scrollToLatestAnswerInPage, site), true);
       report('scrolled-bottom', '已滚动到网页回答底部');
       await sleep(600);
+      checkCancelled();
       systemClipboard.writeText(marker);
       const clicked = await webContents.executeJavaScript(
         scriptCall(clickLatestCopyButtonInPage, site),
@@ -887,6 +890,7 @@ async function copyLatestAnswerMarkdown(webContents, site, onProgress) {
       let fallbackUsed = false;
       const clickStartedAt = Date.now();
       try {
+        checkCancelled();
         if (!clicked.center || typeof webContents.sendInputEvent !== 'function') {
           throw new Error('当前 WebContents 不支持原生鼠标事件');
         }
@@ -903,6 +907,7 @@ async function copyLatestAnswerMarkdown(webContents, site, onProgress) {
           type: 'mouseUp', ...point, button: 'left', clickCount: 1,
         });
       } catch (error) {
+        if (signal?.aborted) throw error;
         clickMethod = 'dom-click';
         fallbackUsed = true;
         const fallback = await domFallback();
@@ -917,6 +922,7 @@ async function copyLatestAnswerMarkdown(webContents, site, onProgress) {
 
       for (let attempt = 0; attempt < 64; attempt += 1) {
         await sleep(125);
+        checkCancelled();
         const value = systemClipboard.readText();
         const formats = typeof systemClipboard.availableFormats === 'function'
           ? systemClipboard.availableFormats()
@@ -1174,7 +1180,8 @@ async function runWebChat(view, prompt, options = {}) {
             renderState || {},
           );
         }
-        const copied = await copyLatestAnswerMarkdown(webContents, site, emit);
+        checkAborted();
+        const copied = await copyLatestAnswerMarkdown(webContents, site, emit, options.signal);
         checkAborted();
         extraction = {
           ok: !!copied?.ok,
@@ -1247,7 +1254,9 @@ async function runWebChat(view, prompt, options = {}) {
       renderNotified = true;
       emit('page-rendered', '最终页面渲染检查完成，开始查找复制节点', finalRenderState || {});
     }
-    const copied = await copyLatestAnswerMarkdown(webContents, site, emit);
+    checkAborted();
+    const copied = await copyLatestAnswerMarkdown(webContents, site, emit, options.signal);
+    checkAborted();
     extraction = {
       ok: !!copied?.ok,
       source: copied?.ok ? 'copy-button' : 'dom',
@@ -1300,6 +1309,10 @@ async function runWebChat(view, prompt, options = {}) {
       },
     };
   } catch (error) {
+    if (options.signal?.aborted) {
+      emit('cancelled', '网页问答已停止');
+      return { ok: false, cancelled: true, site, title, url, error: '网页问答已停止', durationMs: Date.now() - startedAt };
+    }
     emit('web-chat-error', '网页大模型处理失败', {
       error: String(error?.message || error || '网页聊天失败'),
     });

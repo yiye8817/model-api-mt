@@ -19,6 +19,45 @@ app.whenReady().then(async () => {
   const view = new BrowserView({ webPreferences: { backgroundThrottling: false } });
   win.setBrowserView(view);
   view.setBounds({ x: 0, y: 0, width: 900, height: 700 });
+  const { extractVisibleConversation, WebChatRequests } = require('./web-conversation.cjs');
+  await view.webContents.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(`<main style="width:900px"><article data-testid="conversation-turn-0"><div data-message-author-role="user" data-message-id="u1">A 保修期？</div><div data-message-author-role="assistant" data-message-id="a1">三年</div></article></main>`));
+  const snapshot = await extractVisibleConversation(view, { site: 'chatgpt' });
+  assert.deepEqual(snapshot.messages.map(m => m.role), ['user', 'assistant'], JSON.stringify({snapshot, geometry: await view.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-message-author-role]')).map(el => ({text:el.textContent,style:getComputedStyle(el).display,width:el.getBoundingClientRect().width,height:el.getBoundingClientRect().height}))`)}));
+  assert.equal(snapshot.coverage.scope, 'visible');
+  assert.equal(snapshot.context_complete, true);
+  await view.webContents.executeJavaScript(`document.querySelector('article').dataset.testid='conversation-turn-7'`);
+  assert.equal((await extractVisibleConversation(view, {site:'chatgpt'})).context_complete, false);
+  await view.webContents.executeJavaScript(`document.querySelector('main').insertAdjacentHTML('beforeend','<button data-testid="stop-button">Stop generating</button>')`);
+  assert.equal((await extractVisibleConversation(view, {site:'chatgpt'})).messages.at(-1).complete, false);
+  await view.webContents.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<main>普通页面含有 assistant 和 user 这些词。</main>'));
+  assert.equal((await extractVisibleConversation(view)).messages.length, 0);
+  const requests = new WebChatRequests();
+  const controller = requests.begin(1,'tab','round-1');
+  assert.throws(() => requests.begin(1,'tab','round-2'), /busy/);
+  assert.equal(requests.cancel(2,'tab','round-1'), false);
+  assert.equal(requests.cancel(1,'tab','round-1'), true);
+  assert.equal(controller.signal.aborted, true);
+  requests.finish(1,'tab','round-1');
+  requests.cancel(1,'tab','round-2');
+  assert.equal(requests.begin(1,'tab','round-2').signal.aborted, true, 'cancel-before-start must survive IPC ordering');
+  requests.finish(1,'tab','round-2');
+  await view.webContents.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(`<main><textarea aria-label="发送消息"></textarea><button aria-label="发送" onclick="window.sends=(window.sends||0)+1;document.querySelector('main').insertAdjacentHTML('beforeend','<button data-testid=stop-button>Stop generating</button><div data-message-author-role=assistant>partial</div>')">发送</button></main>`));
+  const preCancelled = new AbortController(); preCancelled.abort();
+  const noSend = await runWebChat(view, 'before cancel', {signal:preCancelled.signal,timeoutMs:1000});
+  assert.equal(noSend.cancelled, true);
+  assert.equal(await view.webContents.executeJavaScript('window.sends||0'), 0);
+  const midCancelled = new AbortController();
+  setTimeout(() => midCancelled.abort(), 800);
+  const stopped = await runWebChat(view, 'cancel while generating', {signal:midCancelled.signal,timeoutMs:3000});
+  assert.equal(stopped.cancelled, true);
+  assert.equal(stopped.extraction, undefined);
+  assert.equal(stopped.pageDump, undefined);
+  await view.webContents.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(`<main style="width:900px"><div data-message-author-role="assistant">完整回答</div><button data-testid="copy-turn-action-button" aria-label="Copy" onclick="window.copyAfterCancel=true">Copy</button></main>`));
+  const cancelledCopy = new AbortController();
+  await __test.copyLatestAnswerMarkdown(view, 'chatgpt', event => {
+    if (event === 'copy-nodes-scanned') cancelledCopy.abort();
+  }, cancelledCopy.signal);
+  assert.equal(await view.webContents.executeJavaScript('!!window.copyAfterCancel'), false, 'cancelled copy must not execute DOM fallback');
   const html = `<!doctype html><html><body>
     <main style="height:680px;display:flex;flex-direction:column;justify-content:flex-end">
       <button type="button" data-testid="model-switcher-dropdown-button">GPT-5</button>
