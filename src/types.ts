@@ -1,4 +1,6 @@
 /** 接口对接方式：openai = OpenAI 兼容 (/chat/completions)；anthropic = Claude 原生 (/v1/messages)。 */
+import type { Completion, KnowledgeMessage, LocalKnowledgeSettings } from './lib/knowledgeTypes';
+
 export type ApiType = 'openai' | 'anthropic';
 
 export interface APIProvider {
@@ -178,6 +180,8 @@ export interface WebChatMessageState {
 }
 
 export interface ChatMessage {
+  knowledge?: KnowledgeMessage;
+  completion?: Completion;
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
@@ -302,6 +306,7 @@ export interface ModelEndpointsSettings {
 }
 
 export interface AppSettings {
+  local_knowledge?: LocalKnowledgeSettings;
   model_params: ModelParams;
   web_search: WebSearchSettings;
   model_roles: ModelRolesSettings;

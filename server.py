@@ -2882,7 +2882,10 @@ def _save_json(path, data):
 # ============================================================
 # 通用设置：LLM 参数 + Web 搜索 provider 配置
 # ============================================================
+from local_knowledge.config import default_config as _knowledge_defaults, validate_config as _validate_knowledge_config
+
 DEFAULT_SETTINGS = {
+    'local_knowledge': _knowledge_defaults(),
     'model_params': {
         'temperature': 0.7,             # 采样温度：越低越确定（0=贪婪），越高越发散
         'top_p': 1.0,                   # 核采样：保留累计概率前 top_p 的 tokens
@@ -2970,6 +2973,14 @@ def api_settings_get():
 @app.route('/api/settings', methods=['POST'])
 def api_settings_set():
     data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Settings must be an object'}), 400
+    if 'local_knowledge' in data:
+        try:
+            candidate = _deep_merge(_load_settings()['local_knowledge'], data['local_knowledge'])
+            data['local_knowledge'] = _validate_knowledge_config(candidate)
+        except (ValueError, TypeError) as exc:
+            return jsonify({'error': str(exc)}), 400
     cur = _save_settings(data)
     return jsonify({'ok': True, 'settings': cur})
 
@@ -2979,7 +2990,7 @@ def api_settings_reset():
     """重置为默认值。"""
     section = (request.json or {}).get('section')
     cur = _load_settings()
-    if section in ('model_params', 'web_search', 'model_roles', 'model_endpoints'):
+    if section in ('model_params', 'web_search', 'model_roles', 'model_endpoints', 'local_knowledge'):
         cur[section] = json.loads(json.dumps(DEFAULT_SETTINGS[section]))
     else:
         cur = json.loads(json.dumps(DEFAULT_SETTINGS))
