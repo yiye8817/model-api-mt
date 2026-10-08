@@ -13,6 +13,8 @@ import type { APIProvider, ChatMessage, Conversation, FileAttachment, PluginResu
 import { isDesktopApp, type WebChatTarget } from '../lib/desktopBridge';
 
 interface Props {
+  localKnowledgeEnabled?: boolean;
+  knowledgeProgress?: string;
   conversation: Conversation | null;
   provider: APIProvider | null;
   onSendMessage: (content: string, attachments?: FileAttachment[], options?: { webSearch?: boolean; webChatTargets?: string[] }) => void;
@@ -55,7 +57,7 @@ function formatFileSize(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-export default function ChatArea({ conversation, provider, onSendMessage, isLoading, streamingContent, injectedInput, injectedAttachments, onInjectedInputConsumed, onResend, onEditUserMessage, onLikeMessage, pluginEnabled, onPluginEnabledChange, onPluginRun, onPluginChat, onPluginReloadCode, onOpenSettings, isBusy, onStop, autoRouteEnabled, onAutoRouteEnabledChange, agentRequest, onAgentRequestConsumed, webChatTargets = [], webChatAggregator, onWebChatSelectionChange, onOpenWebChatSite, onOpenUrl }: Props) {
+export default function ChatArea({ conversation, provider, onSendMessage, isLoading, streamingContent, injectedInput, injectedAttachments, onInjectedInputConsumed, onResend, onEditUserMessage, onLikeMessage, pluginEnabled, onPluginEnabledChange, onPluginRun, onPluginChat, onPluginReloadCode, onOpenSettings, isBusy, onStop, autoRouteEnabled, onAutoRouteEnabledChange, agentRequest, onAgentRequestConsumed, webChatTargets = [], webChatAggregator, onWebChatSelectionChange, onOpenWebChatSite, onOpenUrl, localKnowledgeEnabled, knowledgeProgress }: Props) {
   const busy = !!(isBusy ?? isLoading);
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
@@ -282,7 +284,8 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
               Run code & preview HTML
             </div>
           </div>
-          {!provider && (
+          {!provider && localKnowledgeEnabled && <p className="text-emerald-300">可使用本地资料创建对话</p>}
+          {!provider && !localKnowledgeEnabled && (
             <div className="flex items-center gap-2 text-amber-400 bg-amber-400/10 border border-amber-400/20 rounded-lg px-4 py-3 text-sm">
               <AlertCircle size={16} />
               <span>Please add and select an API provider first</span>
@@ -301,6 +304,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
       <div className="border-b border-gray-700 px-6 py-3 bg-gray-900/50 shrink-0">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-medium text-white truncate">{conversation.title}</h2>
+          {localKnowledgeEnabled && <span className="text-xs text-emerald-300">本地优先</span>}
           <div className="flex items-center gap-2 text-xs text-gray-400 shrink-0">
             {provider && (
               <>
@@ -405,7 +409,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
                 </div>
                 <div className="flex items-center gap-2 text-gray-400">
                   <Loader2 size={16} className="animate-spin" />
-                  <span className="text-sm">Thinking...</span>
+                  <span className="text-sm">{knowledgeProgress || 'Thinking...'}</span>
                 </div>
               </div>
             );
@@ -626,13 +630,14 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
 
             <div className="flex-1 relative">
               <textarea
+                aria-label="消息"
                 ref={textareaRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                placeholder={provider ? "Type message... (Shift+Enter for new line, paste images)" : "Select a provider first..."}
-                disabled={!provider || busy}
+                placeholder={provider ? "Type message... (Shift+Enter for new line, paste images)" : localKnowledgeEnabled ? "输入问题，先检索本地资料" : "Select a provider first..."}
+                disabled={(!provider && !localKnowledgeEnabled) || busy}
                 rows={1}
                 className="w-full bg-gray-800 border border-gray-600 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none disabled:opacity-50 disabled:cursor-not-allowed text-sm leading-relaxed"
               />
@@ -640,6 +645,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
             {busy && onStop ? (
               <button
                 onClick={onStop}
+                aria-label="停止"
                 title="停止当前对话 / 插件运行"
                 className="bg-red-600 hover:bg-red-500 text-white p-3 rounded-xl transition-colors shrink-0 flex items-center justify-center"
               >
@@ -648,7 +654,8 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
             ) : (
               <button
                 onClick={handleSend}
-                disabled={(!input.trim() && attachments.length === 0) || busy || !provider}
+                aria-label="发送消息"
+                disabled={(!input.trim() && attachments.length === 0) || busy || (!provider && !localKnowledgeEnabled)}
                 className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white p-3 rounded-xl transition-colors shrink-0"
               >
                 {busy ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
@@ -1399,7 +1406,7 @@ function MessageBubble({
   const isUser = message.role === 'user';
 
   return (
-    <div className={`px-6 py-5 flex gap-4 ${isUser ? 'bg-gray-800/30' : ''} group`}>
+    <div id={`chat-message-${conversationId}-${message.id}`} data-message-role={message.role} className={`px-6 py-5 flex gap-4 ${isUser ? 'bg-gray-800/30' : ''} group`}>
       <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
         isUser
           ? 'bg-gradient-to-br from-blue-500 to-blue-700'

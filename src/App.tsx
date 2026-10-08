@@ -20,6 +20,9 @@ import { useBackendState } from './hooks/useBackendState';
 import { hostOfUrl, isLikelyFrameBlocked, normalizeHttpUrl } from './lib/webFrame';
 import { browserFileUrl, fileTargetName, isBrowserOpenableFile, resolveFileTarget } from './lib/fileTargets';
 import { DEFAULT_MODEL_CHAT_SITES } from './lib/modelChatSites';
+import { cancelKnowledge, recordKnowledge, turnHash } from './lib/knowledgeApi';
+import { checkLocalFirst, createRequestGuard, knowledgeReasons } from './lib/knowledgeRouting';
+import type { Completion, KnowledgeQueryRequest } from './lib/knowledgeTypes';
 import {
   acquireDesktopOverlay,
   detectWebChatSite,
@@ -83,6 +86,9 @@ export default function App() {
   const [pluginActionBusy, setPluginActionBusy] = useState(false);
   /** 当前正在运行的请求的 AbortController；点击「停止」会调用它的 abort()。 */
   const abortControllerRef = useRef<AbortController | null>(null);
+  const requestGuardRef = useRef(createRequestGuard());
+  const activeRequestRef = useRef<{id:string;targets:string[];knowledge:boolean}|null>(null);
+  const [knowledgeProgress, setKnowledgeProgress] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [terminalVisible, setTerminalVisible] = useState(false);
   const [showProjectRunner, setShowProjectRunner] = useState(false);
@@ -575,14 +581,14 @@ export default function App() {
     const provider = state.providers.find(p => p.isDefault)
       || state.providers.find(p => p.id === state.activeProviderId)
       || state.providers[0];
-    if (!provider) return;
+    if (!provider && !settingsRef.current?.local_knowledge?.enabled) return;
 
     const newConv: Conversation = {
       id: crypto.randomUUID(),
       title: 'New Chat',
       messages: [],
-      providerId: provider.id,
-      model: provider.selectedModel,
+      providerId: provider?.id || '',
+      model: provider?.selectedModel || '',
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -591,7 +597,7 @@ export default function App() {
       ...prev,
       conversations: [newConv, ...prev.conversations],
       activeConversationId: newConv.id,
-      activeProviderId: provider.id,
+      activeProviderId: provider?.id || prev.activeProviderId,
     }));
   }, [state.activeProviderId, state.providers, setState]);
 
@@ -634,11 +640,68 @@ export default function App() {
 
 
   // Chat
-  const handleSendMessage = useCallback(async (content: string, attachments?: FileAttachment[], options?: { webSearch?: boolean; webChatTargets?: string[] }) => {
-    if (!activeConversation || !activeProvider) return;
+  const handleSendMessage = useCallback(async (content: string, attachments?: FileAttachment[], options?: { webSearch?: boolean; webChatTargets?: string[]; resendUserId?: string }) => {
+    if (!activeConversation) return;
+    const conversationSnapshot = {...activeConversation,messages:activeConversation.messages.filter(m=>m.id!==options?.resendUserId)};
+    const requestId=crypto.randomUUID(), controller=new AbortController();
+    requestGuardRef.current.start(requestId);abortControllerRef.current=controller;
+    const localSettings=settingsRef.current?.local_knowledge;
+    const attemptKnowledge=!!localSettings?.enabled&&!!content.trim()&&!pluginEnabled&&!attachments?.length;
+    activeRequestRef.current={id:requestId,targets:options?.webChatTargets||[],knowledge:attemptKnowledge};
+    setIsLoading(true);setStreamingContent('');setKnowledgeProgress(attemptKnowledge?'检查本地资料':'');
+    const userMsg:ChatMessage={id:options?.resendUserId||crypto.randomUUID(),role:'user',content:content||'(file upload)',timestamp:Date.now(),attachments};
+    setState(prev=>({...prev,conversations:prev.conversations.map(c=>c.id===conversationSnapshot.id?{...c,
+      messages:[...c.messages.filter(m=>m.id!==userMsg.id),userMsg],
+      title:conversationSnapshot.messages.length?c.title:(content||attachments?.[0]?.name||'New Chat').slice(0,40),updatedAt:Date.now()}:c)}));
+    const history=conversationSnapshot.messages.map(m=>({role:m.role,content:m.content}));
+    const globalSystem=settingsRef.current?.model_params.system_prompt||'';
+    const styleConstraints=[...(conversationSnapshot.messages[0]?.role==='system'?[]:[globalSystem]),...history.filter(m=>m.role==='system').map(m=>m.content)].filter(Boolean).join('\n');
+    const query:KnowledgeQueryRequest={request_id:requestId,question:content,context:history,system_constraints:styleConstraints,
+      source_ids:localSettings?.selected_source_ids||[],mode:options?.webChatTargets?.length?'web':'api',
+      online_target:options?.webChatTargets?.length?{kind:'web',target_ids:options.webChatTargets}:activeProvider?{kind:'api',provider_id:activeProvider.id,model:activeProvider.selectedModel}:null,
+      parameters:{...settingsRef.current?.model_params},conversation_id:conversationSnapshot.id,user_message_id:userMsg.id};
+    const progressLabels:Record<string,string>={prepare:'理解问题',retrieval:'检索本地资料',matching:'筛选匹配内容',generate:'生成本地回答',verify:'核对证据',miss:'转在线',hit:'本地回答'};
+    const poll=attemptKnowledge?window.setInterval(()=>{
+      if(controller.signal.aborted||!requestGuardRef.current.isCurrent(requestId))return;
+      fetch(`/api/knowledge/requests/${requestId}`).then(r=>r.ok?r.json():null).then(data=>{
+        if(data&&requestGuardRef.current.isCurrent(requestId)&&progressLabels[data.stage])setKnowledgeProgress(progressLabels[data.stage]);
+      }).catch(()=>{});
+    },500):null;
+    const localRoute=await checkLocalFirst(query,{enabled:attemptKnowledge,onlineFallback:localSettings?.online_fallback!==false,signal:controller.signal});
+    if(poll!==null)window.clearInterval(poll);
+    const finish=()=>requestGuardRef.current.finishRequest(requestId,()=>{
+      activeRequestRef.current=null;if(abortControllerRef.current===controller)abortControllerRef.current=null;
+      setIsLoading(false);setStreamingContent('');setKnowledgeProgress('');
+    });
+    if(localRoute.decision==='hit'||localRoute.decision==='cancelled'||localRoute.decision==='blocked'||!activeProvider){
+      const hit=localRoute.decision==='hit'?localRoute.result:null;
+      const cancelled=localRoute.decision==='cancelled'||controller.signal.aborted;
+      const reason=localRoute.decision==='hit'?'':localRoute.reason;
+      const message:ChatMessage={id:crypto.randomUUID(),role:'assistant',timestamp:Date.now(),
+        content:cancelled?'⏹️ 已停止':hit?.answer||`本地资料未能回答：${knowledgeReasons[reason]||reason}。${!activeProvider?'请配置在线模型以使用兜底。':'在线兜底未开启。'}`,
+        model:hit?.local_model,completion:{status:cancelled?'stopped':hit?'complete':'error',kind:'local',request_id:requestId,finished_at:Date.now()},
+        knowledge:hit?{request_id:requestId,origin:hit.answer_origin||'local_generated',citations:hit.citations,trace:hit.trace,local_model:hit.local_model,duration_ms:hit.duration_ms}:undefined};
+      setState(prev=>({...prev,conversations:prev.conversations.map(c=>c.id===conversationSnapshot.id?{...c,messages:[...c.messages,message],updatedAt:Date.now()}:c)}));
+      finish();return;
+    }
+    setKnowledgeProgress('');
+    const missReason=localRoute.reason;
+    const completeMetadata=async(answer:string,kind:Completion['kind'],status:Completion['status']='complete',context=history,systemConstraints=styleConstraints)=>({
+      completion:{status,kind,request_id:requestId,finished_at:Date.now(),effective_constraints:systemConstraints,context,
+        origin_hash:await turnHash(content,answer,context,systemConstraints)} satisfies Completion,
+      knowledge:{request_id:requestId,origin:'online' as const,reason:missReason,citations:[],trace:localRoute.result?.trace||[]},
+    });
+    const collect=async(message:ChatMessage,sourceKind:'api_chat'|'web_chat'|'web_synthesis'='api_chat',locator?:Record<string,unknown>,context=history,contextComplete=true)=>{
+      if(!localSettings?.enabled||!message.completion||controller.signal.aborted)return;
+      if(sourceKind==='api_chat'&&!localSettings.collect_api_chats||sourceKind!=='api_chat'&&!localSettings.collect_web_chats)return;
+      await recordKnowledge({conversation_id:effectiveConversation.id,user_message_id:userMsg.id,assistant_message_id:message.id,
+        question:content,answer:message.content,context,system_constraints:message.completion.effective_constraints||'',
+        completion:message.completion,provider_id:message.providerId,model:message.model,source_kind:sourceKind,locator,context_complete:contextComplete}).catch(()=>{});
+    };
+    let streamedForRequest='';
 
     // ---------- 自动路由：意图分析 + 上下文话题判定 + 角色路由 ----------
-    let effectiveConversation: Conversation = activeConversation;
+    let effectiveConversation: Conversation = conversationSnapshot;
     let effectiveProvider: APIProvider = activeProvider;
     let autoRouteInfo: ChatMessage['autoRoute'] | undefined;
     let autoRouteData: AutoRouteResult | undefined;
@@ -658,11 +721,13 @@ export default function App() {
         }));
         const r = await fetch('/api/auto-route', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
           body: JSON.stringify({ message: content, recent_messages: recent }),
         });
         if (r.ok) {
           const data = await r.json() as AutoRouteResult;
+          if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
           autoRouteData = data;
           // 1) 是否新建对话
           if (!data.same_topic && activeConversation.messages.length > 0) {
@@ -719,6 +784,11 @@ export default function App() {
       }
     }
 
+    if(controller.signal.aborted){
+      const stopped:ChatMessage={id:crypto.randomUUID(),role:'assistant',content:'⏹️ 已停止',timestamp:Date.now(),completion:{status:'stopped',kind:'api',request_id:requestId,finished_at:Date.now()}};
+      setState(prev=>({...prev,conversations:prev.conversations.map(c=>c.id===conversationSnapshot.id?{...c,messages:[...c.messages,stopped]}:c)}));finish();return;
+    }
+
     // 决定是否进入「讯息」检索研究工作流：讯息意图 → 全量检索；同话题的格式/内容微调 → 复用上次来源
     const ADJUSTABLE_INTENTS = new Set(['文字润色', '问答', '数据分析', '未知']);
     let researchMode: 'full' | 'adjust' | null = null;
@@ -741,14 +811,6 @@ export default function App() {
       autoRouteData.intent === '代码编写'
     );
 
-    const userMsg: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: 'user',
-      content: content || '(file upload)',
-      timestamp: Date.now(),
-      attachments,
-    };
-
     const isFirstMessage = effectiveConversation.messages.length === 0;
     const title = isFirstMessage
       ? (content || attachments?.[0]?.name || 'New Chat').slice(0, 40) + ((content || '').length > 40 ? '...' : '')
@@ -758,20 +820,19 @@ export default function App() {
       ...prev,
       conversations: prev.conversations.map(c =>
         c.id === effectiveConversation.id
-          ? { ...c, messages: [...c.messages, userMsg], title, updatedAt: Date.now() }
-          : c
+          ? { ...c, messages: [...c.messages.filter(m=>m.id!==userMsg.id), userMsg], title, updatedAt: Date.now() }
+          : createdNewConv && c.id===conversationSnapshot.id ? {...c,messages:c.messages.filter(m=>m.id!==userMsg.id)} : c
       ),
     }));
 
     setIsLoading(true);
     setStreamingContent('');
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
     let aborted = false;
     let inlineAssistantId: string | null = null;
 
     try {
       // ---------- 网页 AI 群聊：并行询问已打开网页 → 基本对话模型综合 ----------
+      if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
       if (webChatMode && desktopForWebChat) {
         const assistantId = crypto.randomUUID();
         inlineAssistantId = assistantId;
@@ -868,6 +929,7 @@ export default function App() {
         let removeWebChatProgress: (() => void) | undefined;
         if (typeof desktopForWebChat.onWebChatProgress === 'function') {
           removeWebChatProgress = desktopForWebChat.onWebChatProgress(event => {
+            if(event.requestId!==requestId||controller.signal.aborted)return;
             const current = progress.get(event.id);
             if (!current) return;
             progress.set(event.id, {
@@ -890,11 +952,13 @@ export default function App() {
         const allWebChats = Promise.all(selectedWebChatTargets.map(async target => {
           let result: WebChatResult;
           try {
-            result = await desktopForWebChat.webChat(target.id, content.trim(), 300000);
+            if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
+            result = await desktopForWebChat.webChat(target.id, content.trim(), 300000, requestId);
           } catch (error: any) {
             result = { ok: false, error: error?.message || String(error) };
           }
           const current = progress.get(target.id);
+          if(controller.signal.aborted)return {target,result:{ok:false,cancelled:true} as WebChatResult};
           const combinedEvents = [...(current?.events || []), ...(result.progressEvents || [])];
           const seenEvents = new Set<string>();
           const events = combinedEvents.filter(event => {
@@ -975,7 +1039,7 @@ export default function App() {
         for (const body of synthBodies) {
           const response = await fetch('/api/chat', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
             signal: controller.signal,
             body: JSON.stringify(body),
           });
@@ -992,8 +1056,12 @@ export default function App() {
         if (!synthData) throw new Error(`网页回答已返回，但综合失败：${synthError || '未知错误'}`);
         const synthesis = String(synthData?.choices?.[0]?.message?.content || '').trim();
         const usage = synthData?.usage || {};
+        const finalContent=`## 综合输出\n\n${synthesis}${failureSummary}`;
+        const webMetadata=await completeMetadata(finalContent,'web',synthData?.choices?.[0]?.finish_reason==='length'?'partial':'complete');
+        if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
         updateWebAssistant({
-          content: `## 综合输出\n\n${synthesis}${failureSummary}`,
+          ...webMetadata,
+          content: finalContent,
           timestamp: Date.now(),
           providerId: aggregationProvider.id,
           model: aggregationProvider.selectedModel,
@@ -1006,6 +1074,15 @@ export default function App() {
             liked: false,
           },
         });
+        void collect({id:assistantId,role:'assistant',content:finalContent,timestamp:Date.now(),providerId:aggregationProvider.id,model:aggregationProvider.selectedModel,...webMetadata},'web_synthesis',undefined,history,
+          successes.every(item=>item.result.contextSnapshot?.context_complete===true));
+        for(const item of successes){
+          if(item.result.partial||!item.result.validation?.complete)continue;
+          const context=(item.result.contextSnapshot?.messages||[]).map(m=>({role:m.role,content:m.content}));
+          const metadata=await completeMetadata(item.result.content||'','web','complete',context,'');
+          void collect({id:assistantId,role:'assistant',content:item.result.content||'',timestamp:Date.now(),model:item.result.model||'unknown',...metadata},'web_chat',
+            {kind:'web',url:item.result.url||item.target.url,site:item.result.site||item.target.site,tab_id:item.target.id},context,item.result.contextSnapshot?.context_complete===true);
+        }
         return;
       }
 
@@ -1092,7 +1169,7 @@ export default function App() {
             try {
               const pr = await fetch('/api/research/plan', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
                 signal: controller.signal,
                 body: JSON.stringify({ query: content.trim() }),
               });
@@ -1116,7 +1193,7 @@ export default function App() {
               try {
                 const sr = await fetch('/api/web-search', {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
                   signal: controller.signal,
                   body: JSON.stringify({
                     query: q,
@@ -1151,7 +1228,7 @@ export default function App() {
           addStep('整理输出', '调用模型汇总…');
           const syn = await fetch('/api/research/synthesize', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
             signal: controller.signal,
             body: JSON.stringify({ query: synthQuery, instruction: synthInstruction, sources: rawSources }),
           });
@@ -1161,11 +1238,14 @@ export default function App() {
           }
           const synd = await syn.json();
           const answer = synd.answer || '（未生成内容）';
+          const metadata=await completeMetadata(answer,'api');
+          if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
           const usedSources: ChatSource[] = rawSources
             .map(s => ({ title: s.title || '', url: s.url || '', snippet: s.snippet || (s.content ? s.content.slice(0, 160) : '') }))
             .filter((s: ChatSource) => s.url);
           addStep('完成', '', 'done');
-          updateA(m => ({ ...m, content: answer, sources: usedSources.length ? usedSources : undefined, timestamp: Date.now() }));
+          updateA(m => ({ ...m, ...metadata, content: answer, sources: usedSources.length ? usedSources : undefined, timestamp: Date.now() }));
+          void collect({id:assistantId,role:'assistant',content:answer,timestamp:Date.now(),model:synd.model||'unknown',...metadata});
         } catch (e: any) {
           if (e?.name === 'AbortError' || controller.signal.aborted) {
             aborted = true;
@@ -1224,7 +1304,7 @@ export default function App() {
         try {
           const res = await fetch('/api/chat-with-plugin/stream', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
             signal: controller.signal,
             body: JSON.stringify({
               message: content || '(file upload)',
@@ -1318,7 +1398,7 @@ export default function App() {
           const wsCfg = settingsRef.current?.web_search;
           const searchRes = await fetch('/api/web-search', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
             body: JSON.stringify({
               query: content.trim(),
               provider: wsCfg?.provider,
@@ -1358,7 +1438,7 @@ export default function App() {
       const mp = settingsRef.current?.model_params || {};
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
         signal: controller.signal,
         body: JSON.stringify({
           baseUrl: effectiveProvider.baseUrl,
@@ -1391,13 +1471,17 @@ export default function App() {
       let usagePrompt: number | undefined;
       let usageCompletion: number | undefined;
       let usageTotal: number | undefined;
+      let sawDone=false;
+      let finishReason:string|undefined;
 
       const consumeFrame = (json: any) => {
         if (json?.error) throw new Error(json.error);
         const delta = json?.choices?.[0]?.delta?.content;
+        if(json?.choices?.[0]?.finish_reason)finishReason=json.choices[0].finish_reason;
         if (delta) {
           fullContent += delta;
-          setStreamingContent(fullContent);
+          streamedForRequest=fullContent;
+          if(requestGuardRef.current.isCurrent(requestId))setStreamingContent(fullContent);
         }
         // OpenAI 兼容：开启 stream_options.include_usage 后末帧含 usage
         if (json?.usage && typeof json.usage === 'object') {
@@ -1415,6 +1499,7 @@ export default function App() {
           while ((lineEnd = buffer.indexOf('\n')) !== -1) {
             const line = buffer.slice(0, lineEnd).trim();
             buffer = buffer.slice(lineEnd + 1);
+            if(line==='data: [DONE]')sawDone=true;
             if (!line || line === 'data: [DONE]') continue;
             if (!line.startsWith('data: ')) continue;
             try {
@@ -1445,8 +1530,12 @@ export default function App() {
 
       const durationMs = Date.now() - t0;
       const totalTokens = usageTotal ?? (((usagePrompt ?? 0) + (usageCompletion ?? 0)) || undefined);
+      const responseStatus:Completion['status']=(sawDone||finishReason==='stop')&&(!finishReason||finishReason==='stop')&&fullContent!=='No response received.'?'complete':'partial';
+      const metadata=await completeMetadata(fullContent,'api',responseStatus);
+      if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
 
       const assistantMsg: ChatMessage = {
+        ...metadata,
         id: crypto.randomUUID(),
         role: 'assistant',
         content: fullContent,
@@ -1472,11 +1561,12 @@ export default function App() {
             : c
         ),
       }));
+      void collect(assistantMsg);
 
       // 后台上报模型统计（失败不影响 UI）
       fetch('/api/model-stats/record', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
         body: JSON.stringify({
           providerId: effectiveProvider.id,
           model: effectiveProvider.selectedModel,
@@ -1494,8 +1584,9 @@ export default function App() {
           ...prev,
           conversations: prev.conversations.map(c => {
             if (c.id !== effectiveConversation.id) return c;
-            const partial = streamingContentRef.current.trim();
+            const partial = streamedForRequest.trim();
             const stoppedMsg: ChatMessage = {
+              completion:{status:'stopped',kind:webChatMode?'web':'api',request_id:requestId,finished_at:Date.now()},
               id: crypto.randomUUID(),
               role: 'assistant',
               content: partial ? `${partial}\n\n⏹️ _已停止_` : '⏹️ 已停止',
@@ -1556,8 +1647,7 @@ export default function App() {
       // 防止 lint 抱怨未使用变量；同时它本身用于清理逻辑分支
       void aborted;
       if (abortControllerRef.current === controller) abortControllerRef.current = null;
-      setIsLoading(false);
-      setStreamingContent('');
+      finish();
     }
   }, [activeConversation, activeProvider, pluginEnabled, autoRouteEnabled, setState, webChatTargets, webChatAggregator, configuredWebChatAggregator]);
 
@@ -1688,6 +1778,9 @@ export default function App() {
 
   /** 终止当前进行中的对话 / 插件流水线 / 插件运行修改请求。 */
   const handleStop = useCallback(() => {
+    const request=activeRequestRef.current;
+    if(request?.knowledge)void cancelKnowledge(request.id).catch(()=>{});
+    if(request){const desktop=getDesktop();for(const target of request.targets)if(desktop?.cancelWebChat)void desktop.cancelWebChat(target,request.id).catch(()=>{});}
     const ctl = abortControllerRef.current;
     if (ctl) {
       try { ctl.abort(); } catch { /* noop */ }
@@ -1784,91 +1877,14 @@ export default function App() {
   }, [state.providers, setState]);
 
   useEffect(() => {
-    if (!pendingResend || !activeProviderRef.current) return;
-    const { convId, userMsg } = pendingResend;
-    const conv = state.conversations.find(c => c.id === convId);
-    if (!conv || conv.messages.length === 0 || conv.messages[conv.messages.length - 1]?.id !== userMsg.id) {
-      setPendingResend(null);
-      return;
-    }
+    if(!pendingResend)return;
+    const {convId,userMsg}=pendingResend;
+    const conv=state.conversations.find(c=>c.id===convId);
+    if(!conv||conv.messages.at(-1)?.id!==userMsg.id){setPendingResend(null);return;}
+    if(activeConversation?.id!==convId){setState(prev=>({...prev,activeConversationId:convId}));return;}
     setPendingResend(null);
-    setIsLoading(true);
-    setStreamingContent('');
-    const provider = activeProviderRef.current;
-    const apiMessages = buildApiMessages(conv.messages, !!provider.supportsVision);
-    fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
-        apiType: provider.apiType,
-        model: provider.selectedModel,
-        messages: apiMessages,
-        stream: true,
-      }),
-    })
-      .then(async response => {
-        if (!response.ok) throw new Error(`API Error (${response.status}): ${await response.text()}`);
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-        let fullContent = '';
-        let buffer = '';
-        if (!reader) return;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (value) buffer += decoder.decode(value, { stream: true });
-          let lineEnd: number;
-          while ((lineEnd = buffer.indexOf('\n')) !== -1) {
-            const line = buffer.slice(0, lineEnd).trim();
-            buffer = buffer.slice(lineEnd + 1);
-            if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
-            try {
-              const json = JSON.parse(line.slice(6));
-              if (json.error) throw new Error(json.error);
-              const delta = json.choices?.[0]?.delta?.content;
-              if (delta) { fullContent += delta; setStreamingContent(fullContent); }
-            } catch (e) {
-              if (e instanceof Error && e.message) throw e;
-            }
-          }
-          if (done) break;
-        }
-        if (!fullContent) fullContent = 'No response received.';
-        const assistantMsg: ChatMessage = {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: fullContent,
-          timestamp: Date.now(),
-          providerId: provider.id,
-          model: provider.selectedModel,
-        };
-        setState(prev => ({
-          ...prev,
-          conversations: prev.conversations.map(c =>
-            c.id === convId ? { ...c, messages: [...c.messages, assistantMsg], updatedAt: Date.now() } : c
-          ),
-        }));
-      })
-      .catch((err: any) => {
-        const errorMsg: ChatMessage = {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: `❌ **Error**: ${err.message}\n\n> Make sure the Python backend is running:\n\n\`\`\`bash\npip install flask requests\npython server.py\n\`\`\``,
-          timestamp: Date.now(),
-        };
-        setState(prev => ({
-          ...prev,
-          conversations: prev.conversations.map(c =>
-            c.id === convId ? { ...c, messages: [...c.messages, errorMsg], updatedAt: Date.now() } : c
-          ),
-        }));
-      })
-      .finally(() => {
-        setIsLoading(false);
-        setStreamingContent('');
-      });
-  }, [pendingResend, state.conversations, buildApiMessages, setState]);
+    void handleSendMessage(userMsg.content,userMsg.attachments,{resendUserId:userMsg.id});
+  },[pendingResend,state.conversations,activeConversation,handleSendMessage,setState]);
 
   // Loading screen
   if (loading) {
@@ -2108,6 +2124,8 @@ export default function App() {
                 provider={activeProvider}
                 onSendMessage={handleSendMessage}
                 isLoading={isLoading}
+                localKnowledgeEnabled={settings?.local_knowledge?.enabled}
+                knowledgeProgress={knowledgeProgress}
                 streamingContent={streamingContent}
                 injectedInput={injectedForInput?.content ?? null}
                 injectedAttachments={injectedForInput?.attachments}

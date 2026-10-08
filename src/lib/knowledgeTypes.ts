@@ -45,6 +45,7 @@ export interface Completion {
   status: 'complete' | 'stopped' | 'error' | 'partial' | 'unknown';
   kind: 'api' | 'web' | 'local' | 'workflow'; request_id: string; finished_at: number;
   effective_constraints?: string; parameters?: Record<string, unknown>; origin_hash?: string;
+  context?: {role:string;content:string}[];
 }
 export interface CompletedTurn {
   conversation_id: string; user_message_id: string; assistant_message_id: string;
