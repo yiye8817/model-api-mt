@@ -41,6 +41,17 @@ export async function queryKnowledge(request: KnowledgeQueryRequest, signal: Abo
   return result;
 }
 
+export async function querySavedAnswer(request: KnowledgeQueryRequest, signal: AbortSignal): Promise<KnowledgeQueryResult> {
+  const response=await fetch('/api/content-library/reuse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal});
+  if(!response.ok)throw new KnowledgeHttpError(response.status,'已保存问答检索失败');
+  const result=await response.json() as KnowledgeQueryResult;
+  if(result.request_id!==request.request_id||!['hit','miss','cancelled'].includes(result.decision)||!Array.isArray(result.trace)||!Array.isArray(result.citations))
+    throw new KnowledgeHttpError(502,'已保存问答返回格式无效');
+  if(result.decision==='hit'&&(!result.answer?.trim()||result.answer_origin!=='saved_answer'||!result.saved_entry?.id))
+    throw new KnowledgeHttpError(502,'已保存回答缺少来源');
+  return result;
+}
+
 export async function cancelKnowledge(requestId: string): Promise<void> {
   await fetch(`/api/knowledge/query/${encodeURIComponent(requestId)}/cancel`,{method:'POST'});
 }

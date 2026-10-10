@@ -16,6 +16,8 @@ export interface APIProvider {
   isDefault?: boolean;
   models: string[];
   selectedModel: string;
+  embeddingModels?: string[];
+  rerankModels?: string[];
 }
 
 export interface FileAttachment {

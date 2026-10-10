@@ -1,4 +1,4 @@
-import { queryKnowledge, KnowledgeHttpError } from './knowledgeApi';
+import { queryKnowledge, querySavedAnswer, KnowledgeHttpError } from './knowledgeApi';
 import type { KnowledgeQueryRequest,KnowledgeQueryResult } from './knowledgeTypes';
 
 export type LocalRouteResult={decision:'hit';result:KnowledgeQueryResult}|{decision:'fallback'|'blocked'|'cancelled';reason:string;result?:KnowledgeQueryResult};
@@ -6,6 +6,13 @@ export type LocalRouteResult={decision:'hit';result:KnowledgeQueryResult}|{decis
 export async function checkLocalFirst(request:KnowledgeQueryRequest,options:{enabled:boolean;onlineFallback:boolean;signal:AbortSignal}):Promise<LocalRouteResult> {
   if(options.signal.aborted)return {decision:'cancelled',reason:'cancelled'};
   if(!options.enabled)return {decision:'fallback',reason:'disabled'};
+  try {
+    const saved=await querySavedAnswer(request,options.signal);
+    if(options.signal.aborted||saved.decision==='cancelled')return {decision:'cancelled',reason:'cancelled'};
+    if(saved.decision==='hit')return {decision:'hit',result:saved};
+  }catch(error){
+    if(options.signal.aborted||(error instanceof Error&&error.name==='AbortError'))return {decision:'cancelled',reason:'cancelled'};
+  }
   try {
     const result=await queryKnowledge(request,options.signal);
     if(options.signal.aborted||result.decision==='cancelled')return {decision:'cancelled',reason:'cancelled'};

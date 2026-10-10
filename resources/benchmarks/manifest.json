@@ -1,0 +1,37 @@
+{
+  "datasets": [
+    {
+      "name": "MASSIVE 1.1 中文公开子集",
+      "format": "massive",
+      "file": "massive-zh-CN.jsonl",
+      "source_url": "https://github.com/alexa/massive",
+      "upstream_url": "https://amazon-massive-nlu-dataset.s3.amazonaws.com/amazon-massive-dataset-1.1.tar.gz",
+      "license": "CC BY 4.0",
+      "version": "1.1",
+      "upstream_file_sha256": "992bf0bef3d678f08c27e514739bc851163e8f40f530bfb4d5970a2c24408ace",
+      "sampling": "Original file order, first 20 train / 5 dev / 5 test per native intent",
+      "counts": {
+        "test": 288,
+        "train": 1176,
+        "dev": 286
+      },
+      "sha256": "8be89ad6e89f3f40837cddf92a12e4e4ae94f72050f43a2a797e4f7f7e079fec"
+    },
+    {
+      "name": "CMRC2018 开发集文档检索子集",
+      "format": "cmrc",
+      "file": "cmrc2018-dev.json",
+      "source_url": "https://github.com/ymcui/cmrc2018",
+      "upstream_url": "https://raw.githubusercontent.com/ymcui/cmrc2018/master/squad-style-data/cmrc2018_dev.json",
+      "license": "CC BY-SA 4.0",
+      "version": "CMRC2018 dev",
+      "upstream_file_sha256": "e9ff74231f05c230c6fa88b84441ee334d97234cbb610991cd94b82db00c7f1f",
+      "sampling": "First 160 original development paragraphs; retain their questions only for evaluation",
+      "counts": {
+        "paragraphs": 160,
+        "questions": 590
+      },
+      "sha256": "5f11cdb043aa19936478ee9a0b446f8b204e246bec492958fa258b9ffebad357"
+    }
+  ]
+}

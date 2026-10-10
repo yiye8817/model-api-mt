@@ -22,6 +22,8 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
   const [models, setModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
   const [customModel, setCustomModel] = useState('');
+  const [embeddingModels, setEmbeddingModels] = useState('');
+  const [rerankModels, setRerankModels] = useState('');
   const [supportsVision, setSupportsVision] = useState(false);
   const [error, setError] = useState('');
   const [testing, setTesting] = useState(false);
@@ -38,9 +40,11 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       setSupportsVision(!!provider.supportsVision);
       setModels(provider.models);
       setSelectedModel(provider.selectedModel);
+      setEmbeddingModels((provider.embeddingModels || []).join(', '));
+      setRerankModels((provider.rerankModels || []).join(', '));
     } else {
       setName(''); setBaseUrl(''); setApiKey(''); setSource(''); setApiType('openai');
-      setIsDefault(false); setSupportsVision(false); setModels([]); setSelectedModel(''); setCustomModel('');
+      setIsDefault(false); setSupportsVision(false); setModels([]); setSelectedModel(''); setCustomModel(''); setEmbeddingModels(''); setRerankModels('');
     }
   }, [provider]);
 
@@ -143,6 +147,8 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
         isDefault,
         models: finalModels,
         selectedModel: finalModel,
+        embeddingModels: embeddingModels.split(/[,，]/).map(value => value.trim()).filter(Boolean),
+        rerankModels: rerankModels.split(/[,，]/).map(value => value.trim()).filter(Boolean),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -191,6 +197,16 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
               className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="block text-sm text-gray-300">Embedding 模型（逗号分隔）
+              <input value={embeddingModels} onChange={e=>setEmbeddingModels(e.target.value)} placeholder="text-embedding-3-small" className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 font-mono text-xs" />
+            </label>
+            <label className="block text-sm text-gray-300">Rerank 模型（逗号分隔）
+              <input value={rerankModels} onChange={e=>setRerankModels(e.target.value)} placeholder="bge-reranker-v2" className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 font-mono text-xs" />
+            </label>
+          </div>
+          <p className="text-xs text-gray-500">供本地知识选择和接口测试；留空时根据 Models 名称自动推断。</p>
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Provider 来源</label>

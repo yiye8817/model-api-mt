@@ -9,7 +9,8 @@ from urllib.parse import urlsplit
 
 def default_config() -> dict:
     def endpoint(protocol):
-        return dict(url='', protocol=protocol, model='', model_revision='', allow_lan=False)
+        return dict(url='', protocol=protocol, model='', model_revision='', allow_lan=False,
+                    source='custom', provider_id='', path='')
     return dict(enabled=False, collect_api_chats=True, collect_web_chats=True,
         embedding_endpoint=endpoint('openai_embeddings'),
         rerank_endpoint={**endpoint('llama_rerank'), 'score_transform': 'identity'},
@@ -53,9 +54,17 @@ def validate_config(value: dict) -> dict:
             raise ValueError(f'Invalid {key}')
         if e['protocol'] != default[key]['protocol'] or type(e['allow_lan']) is not bool:
             raise ValueError(f'Invalid {key} protocol')
-        if any(not isinstance(e[v], str) for v in ('url', 'model', 'model_revision')):
+        if e.get('source', 'custom') not in ('custom', 'provider'):
+            raise ValueError(f'Invalid {key} source')
+        if any(not isinstance(e[v], str) for v in ('url', 'model', 'model_revision', 'provider_id', 'path')):
             raise ValueError(f'Invalid {key} values')
-        if e['url']:
+        if e.get('source', 'custom') == 'provider' and not e['provider_id']:
+            raise ValueError(f'{key} provider_id is required')
+        if e.get('source', 'custom') == 'provider' and key == 'qa_endpoint':
+            raise ValueError('qa_endpoint does not support online Provider mode')
+        if e.get('path') and (not e['path'].startswith('/') or '?' in e['path'] or '#' in e['path'] or '://' in e['path']):
+            raise ValueError(f'Invalid {key} path')
+        if e.get('source', 'custom') == 'custom' and e['url']:
             p = urlsplit(e['url'])
             if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password or p.query or p.fragment:
                 raise ValueError('A local endpoint must be a plain HTTP(S) URL')

@@ -8,8 +8,8 @@ from .config import default_config, stable_hash, validate_config
 
 
 class Runtime:
-    def __init__(self,data_dir,settings,conversations):
-        self.data_dir=Path(data_dir);self.settings=settings;self.conversations=conversations
+    def __init__(self,data_dir,settings,conversations,providers=None):
+        self.data_dir=Path(data_dir);self.settings=settings;self.conversations=conversations;self.providers=providers or (lambda: [])
         self._store=None;self._components=None;self._fingerprint=None;self._lock=threading.RLock();self._recovered=False
         from .service import RequestRegistry
         self._requests=RequestRegistry()
@@ -33,7 +33,7 @@ class Runtime:
             from .ingest import ImportManager
             from .chat_sync import ChatSynchronizer
             from .evaluation import EvaluationRunner
-            models=ModelClients(config);vectors=VectorIndex(self.data_dir,stable_hash(config['embedding_endpoint']),0)
+            models=ModelClients(config, self.providers);vectors=VectorIndex(self.data_dir,models.vector_fingerprint,0)
             retriever=Retriever(self.store,vectors,models)
             service=KnowledgeService(self.store,retriever,models,self.settings,registry=self._requests)
             if self._components:

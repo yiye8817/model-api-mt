@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 
@@ -157,6 +158,7 @@ class ImportManager:
     def _run_paths(self,job_id):
         job=self.snapshot(job_id); event=self._events.setdefault(job_id,threading.Event())
         files=[]; items=[]
+        self.store.update_job_progress(job_id, {'stage': 'scanning', 'current_item': ''})
         for value in job['payload']['roots']:
             selected=Path(value).expanduser().resolve()
             if not selected.exists() or not (selected.is_file() or selected.is_dir()):
@@ -176,11 +178,22 @@ class ImportManager:
         self._process(job_id,job['payload'].get('files',[]),list(job['payload'].get('rejected_items',[])),event,uploaded=True)
 
     def _process(self,job_id,files,items,event,uploaded):
-        self.store.update_job(job_id,status='running',phase='parsing',total=len(files)+len(items))
+        byte_total = 0
+        for entry in files:
+            try:
+                byte_total += Path(entry['path'] if uploaded else entry[0]).stat().st_size
+            except (OSError, KeyError, TypeError):
+                pass
+        self.store.update_job(job_id,status='running',phase='parsing',stage='parsing',total=len(files)+len(items),
+                              bytes_total=byte_total,bytes_completed=0,started_at=self.store.job(job_id).get('started_at') or time.time())
         payload=self.snapshot(job_id)['payload']; waiting=False
+        chunks_total = 0
+        batches_total = 0
         for entry in files:
             if event.is_set(): break
             path=Path(entry['path']) if uploaded else entry[0]
+            display_path = str(entry.get('relative_path', path) if uploaded else path)
+            self.store.update_job_progress(job_id, {'current_item': display_path, 'stage': 'parsing'})
             try:
                 if uploaded:
                     source=Source(id=stable_hash(['upload',job_id,entry['relative_path']]),title=entry['relative_path'],content_hash=hashlib.sha256(path.read_bytes()).hexdigest(),locator={'kind':'upload','relative_path':entry['relative_path'],'copy_path':str(path)})
@@ -200,23 +213,42 @@ class ImportManager:
                     items.append({'path':source.title,'source_id':source.id,'status':'success'})
                     continue
                 document=parse_file(parse_path,encoding=entry.get('encoding') if uploaded else payload.get('encoding'),cancel_event=event)
+                self.store.update_job_progress(job_id, {'stage': 'chunking'})
                 source.metadata={'units':[asdict(u) for u in document.units],'warnings':document.warnings}
                 chunks=chunk_document(document)
+                chunks_total += len(chunks)
+                batches_total += (len(chunks) + 15) // 16
+                self.store.update_job_progress(job_id, {'chunks_total': chunks_total, 'batches_total': batches_total})
                 for chunk in chunks: chunk.keyword_text=' '.join(keyword_tokens(chunk.text))
                 revision=self.store.upsert_pending(source,chunks)
                 if event.is_set(): raise Cancelled('cancelled')
                 if self.index_revision:
-                    self.store.update_job(job_id,phase='indexing')
+                    self.store.update_job(job_id,phase='indexing',stage='embedding')
+                    self.store.update_job_progress(job_id, {'stage': 'embedding', 'chunks_completed': max(0, self.snapshot(job_id).get('chunks_completed', 0)),
+                                                            'current_item': display_path})
                     self.index_revision(source.id,revision,Budget(120,event))
+                    self.store.update_job_progress(job_id, {'stage': 'committing', 'chunks_completed': chunks_total,
+                                                            'batches_completed': batches_total})
                 else: waiting=True
-                items.append({'path':str(path),'source_id':source.id,'revision':revision,'status':'success'})
+                items.append({'path':display_path,'source_id':source.id,'revision':revision,'status':'success',
+                              'chunks':len(chunks)})
             except (Exception,) as exc:
                 if event.is_set(): break
-                items.append({'path':str(path),'status':'failed','reason':str(exc)[:300]})
+                reason = str(exc)[:300]
+                items.append({'path':display_path,'status':'failed','reason':reason})
+                self.store.update_job_progress(job_id, {'stage': 'failed', 'last_error': reason})
             finally:
-                self.store.update_job(job_id,items=items,completed=len(items),succeeded=sum(i['status']=='success' for i in items),skipped=sum(i['status']=='skipped' for i in items),failed=sum(i['status']=='failed' for i in items))
+                try: byte_done = path.stat().st_size
+                except OSError: byte_done = 0
+                current = self.store.job(job_id)
+                self.store.update_job(job_id,items=items,completed=len(items),succeeded=sum(i['status']=='success' for i in items),skipped=sum(i['status']=='skipped' for i in items),failed=sum(i['status']=='failed' for i in items),
+                                      bytes_completed=current.get('bytes_completed', 0) + byte_done,
+                                      chunks_total=chunks_total,batches_total=batches_total)
         status='cancelled' if event.is_set() else 'waiting_index' if waiting else 'done'
-        self.store.update_job(job_id,status=status,phase=status,items=items,completed=len(items),succeeded=sum(i['status']=='success' for i in items),skipped=sum(i['status']=='skipped' for i in items),failed=sum(i['status']=='failed' for i in items))
+        terminal_stage = 'cancelled' if status == 'cancelled' else 'done' if status == 'done' else 'waiting_index'
+        self.store.update_job(job_id,status=status,phase=status,stage=terminal_stage,items=items,completed=len(items),
+                              succeeded=sum(i['status']=='success' for i in items),skipped=sum(i['status']=='skipped' for i in items),
+                              failed=sum(i['status']=='failed' for i in items),chunks_total=chunks_total,batches_total=batches_total)
 
     def recover(self):
         for job in self.store.unfinished_jobs():

@@ -1,6 +1,7 @@
 export interface LocalEndpoint {
   url: string; protocol: 'openai_embeddings' | 'llama_rerank' | 'llama_chat';
   model: string; model_revision: string; allow_lan: boolean;
+  source?: 'custom' | 'provider'; provider_id?: string; path?: string;
   score_transform?: 'identity' | 'sigmoid'; context_tokens?: number; max_output_tokens?: number;
 }
 export interface LocalKnowledgeSettings {
@@ -31,15 +32,19 @@ export interface KnowledgeQueryRequest {
   system_constraints: string; source_ids: string[]; mode: 'api' | 'web';
   online_target: {kind: 'api'; provider_id: string; model: string} | {kind: 'web'; target_ids: string[]} | null;
   parameters: Record<string, unknown>; conversation_id?: string; user_message_id?: string;
+  bypass_saved_reuse?: boolean;
 }
 export interface KnowledgeQueryResult {
   request_id: string; decision: 'hit' | 'miss' | 'cancelled'; reason: string;
   answer: string | null; citations: Citation[]; trace: KnowledgeTraceStep[];
-  local_model: string; duration_ms: number; answer_origin: 'local_generated' | 'validated_cache' | null;
+  local_model: string; duration_ms: number; answer_origin: 'local_generated' | 'validated_cache' | 'saved_answer' | null;
+  saved_entry?: { id: string; question: string; source_name: string; source_url: string; fact_status: 'correct' | 'unverified' | 'uncertain' | 'incorrect' };
+  match_method?: string;
 }
 export interface KnowledgeMessage {
-  request_id: string; origin: 'local_generated' | 'validated_cache' | 'online'; reason?: string;
+  request_id: string; origin: 'local_generated' | 'validated_cache' | 'saved_answer' | 'online'; reason?: string;
   citations: Citation[]; trace: KnowledgeTraceStep[]; local_model?: string; duration_ms?: number;
+  saved_entry?: KnowledgeQueryResult['saved_entry'];
 }
 export interface Completion {
   status: 'complete' | 'stopped' | 'error' | 'partial' | 'unknown';
@@ -57,5 +62,20 @@ export interface CompletedTurn {
 export interface JobSnapshot {
   id: string; kind: string; status: string; phase: string; completed: number; total: number;
   succeeded: number; skipped: number; failed: number; cancel_requested: boolean;
-  items: {path?: string; source_id?: string; status: string; reason?: string}[]; result: Record<string, unknown> | null;
+  stage?: string; current_item?: string; percent?: number; elapsed_seconds?: number; eta_seconds?: number | null;
+  bytes_total?: number; bytes_completed?: number; chunks_total?: number; chunks_completed?: number;
+  batches_total?: number; batches_completed?: number; started_at?: number | null; updated_at?: number | null;
+  finished_at?: number | null; last_error?: string; notification_key?: string;
+  items: {path?: string; source_id?: string; status: string; reason?: string; chunks?: number; revision?: number}[];
+  result: Record<string, unknown> | null;
+}
+
+export interface ProviderSummary {
+  id: string; name: string; api_type: string; configured: boolean;
+  embedding_models: string[]; rerank_models: string[]; reason?: string | null;
+}
+
+export interface ProviderProbeResult {
+  ok: boolean; role: 'embedding' | 'rerank'; model: string; count?: number;
+  dimension?: number; top_score?: number; latency_ms?: number; error?: string;
 }

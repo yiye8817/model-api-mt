@@ -11,7 +11,7 @@ export default function KnowledgePanel({onOpenCitation}:{onOpenCitation:(c:Citat
   const [calibration,setCalibration]=useState(''),[validation,setValidation]=useState(''),[evaluationUpload,setEvaluationUpload]=useState(false),[reviewed,setReviewed]=useState(false);
   const [previewQuestion,setPreviewQuestion]=useState(''),[previewCandidates,setPreviewCandidates]=useState<(Citation&{score:number})[]>([]),[previewBusy,setPreviewBusy]=useState(false);
   const activePreview=useRef<{id:string;controller:AbortController}|null>(null);
-  const folderInput=useRef<HTMLInputElement|null>(null);const {job,error:jobError,cancel}=useKnowledgeJobs(jobId);
+  const folderInput=useRef<HTMLInputElement|null>(null);const {job,jobs,error:jobError,cancel}=useKnowledgeJobs(jobId);const visibleJob=job||jobs[0]||null;
   useEffect(()=>{folderInput.current?.setAttribute('webkitdirectory','');},[]);
   useEffect(()=>()=>{const run=activePreview.current;if(run){run.controller.abort();void cancelKnowledge(run.id).catch(()=>{});}},[]);
   const preview=async()=>{
@@ -26,8 +26,8 @@ export default function KnowledgePanel({onOpenCitation}:{onOpenCitation:(c:Citat
   useEffect(()=>{void refresh();},[refresh]);
   useEffect(()=>{if(job&&['done','failed','cancelled','waiting_index'].includes(job.status))void refresh();},[job?.status,refresh]);
   const action=async(callback:()=>Promise<unknown>)=>{setBusy(true);setError('');try{await callback();await refresh();}catch(e){setError(e instanceof Error?e.message:'操作失败');}finally{setBusy(false);}};
-  const importPath=async(value:string)=>{const r=await knowledgeJson<{job_id:string}>('/api/knowledge/import',{kind:'paths',roots:[value],encoding:encoding||undefined});setJobId(r.job_id);};
-  const filesSelected=(files:FileList|null)=>{if(!files?.length)return;void action(async()=>{await uploadKnowledgeFiles(Array.from(files),setJobId,evaluationUpload?'evaluation':'knowledge',encoding);});};
+  const importPath=async(value:string)=>{if('Notification' in window&&Notification.permission==='default')void Notification.requestPermission();const r=await knowledgeJson<{job_id:string}>('/api/knowledge/import',{kind:'paths',roots:[value],encoding:encoding||undefined});setJobId(r.job_id);};
+  const filesSelected=(files:FileList|null)=>{if(!files?.length)return;if('Notification' in window&&Notification.permission==='default')void Notification.requestPermission();void action(async()=>{await uploadKnowledgeFiles(Array.from(files),setJobId,evaluationUpload?'evaluation':'knowledge',encoding);});};
   const datasetSources=sources.filter(s=>s.status==='evaluation_dataset');
   const activate=async()=>{
     const result=await knowledgeJson<{evaluation_profile_id:string}>('/api/knowledge/evaluate',{operation:'activate',report_id:jobId,reviewed:true});
@@ -52,7 +52,7 @@ export default function KnowledgePanel({onOpenCitation}:{onOpenCitation:(c:Citat
       <label className={button}>上传文件<input aria-label="上传知识文件" type="file" multiple className="hidden" onChange={e=>{filesSelected(e.target.files);e.target.value='';}}/></label>
       <label className={button}>上传目录<input aria-label="上传知识目录" ref={folderInput} type="file" multiple className="hidden" onChange={e=>{filesSelected(e.target.files);e.target.value='';}}/></label>
     </div>
-    {jobId&&<JobView job={job} error={jobError} cancel={cancel}/>}
+    {jobId||jobs.length>0 ? <JobView job={visibleJob} error={jobError} cancel={cancel}/> : null}
     <input aria-label="搜索资料来源" value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索资料来源" className="w-full bg-gray-950 border border-gray-700 p-2 rounded"/>
     <div className="space-y-2">{sources.map(source=><article key={source.id} className="border border-gray-700 rounded p-3">
       <div className="flex gap-2 items-start"><label><input type="checkbox" aria-label={`参与检索：${source.title}`} checked={source.enabled} onChange={e=>void action(()=>knowledgeJson(`/api/knowledge/sources/${source.id}`,{enabled:e.target.checked},'PATCH'))}/></label>
@@ -81,9 +81,11 @@ export default function KnowledgePanel({onOpenCitation}:{onOpenCitation:(c:Citat
 }
 
 function JobView({job,error,cancel}:{job:JobSnapshot|null;error:string|null;cancel:()=>Promise<void>}) {
-  return <div className="border border-gray-700 rounded p-3 text-xs"><p>{job?`${job.phase} · ${job.completed}/${job.total} · 成功 ${job.succeeded} · 跳过 ${job.skipped} · 失败 ${job.failed}`:'正在读取任务…'}</p>
+  const stages=['queued','scanning','parsing','chunking','embedding','committing','done'];const active=job?.stage||job?.phase||'queued';const percent=typeof job?.percent==='number'?job.percent:job&&job.total?job.completed/job.total*100:0;
+  return <div className="border border-gray-700 rounded p-3 text-xs space-y-2"><div className="flex justify-between gap-3"><p>{job?`${job.current_item||'等待处理'} · ${job.completed}/${job.total} 项 · 成功 ${job.succeeded} · 跳过 ${job.skipped} · 失败 ${job.failed}`:'正在读取任务…'}</p><strong>{percent.toFixed(1)}%</strong></div>
+    {job&&<><div className="h-2 rounded bg-gray-800 overflow-hidden"><div className={`h-full ${job.status==='failed'?'bg-red-500':job.status==='done'?'bg-emerald-500':'bg-cyan-500'} transition-all`} style={{width:`${Math.min(100,Math.max(0,percent))}%`}} /></div><div className="flex flex-wrap gap-1">{stages.map(stage=><span key={stage} className={`rounded px-1.5 py-0.5 ${stage===active?'bg-cyan-900 text-cyan-200':stages.indexOf(stage)<stages.indexOf(active)?'bg-gray-700 text-gray-300':'bg-gray-900 text-gray-600'}`}>{stage}</span>)}</div><p className="text-gray-400">{job.bytes_completed||0}/{job.bytes_total||0} bytes · {job.chunks_completed||0}/{job.chunks_total||0} chunks · {job.batches_completed||0}/{job.batches_total||0} batches{job.eta_seconds?` · 预计剩余 ${job.eta_seconds.toFixed(0)} 秒`:''}</p></>}
     {error&&<p className="text-amber-300">{error}</p>}{job&&!['done','failed','cancelled'].includes(job.status)&&<button className={`${button} mt-2`} onClick={()=>void cancel()}>停止索引任务</button>}
-    {job&&job.items?.length>0&&<details className="mt-2"><summary>逐项结果</summary><ul className="mt-2 space-y-1">{job.items.map((item,i)=><li key={i}>{item.path||item.source_id} · {item.status} {item.reason}</li>)}</ul></details>}
-    {job?.status==='failed'&&Boolean(job.result?.error)&&<p className="mt-2 text-amber-300">{String(job.result?.error)}</p>}
+    {job&&job.items?.length>0&&<details className="mt-2"><summary>逐项结果（{job.items.length}）</summary><ul className="mt-2 space-y-1 max-h-48 overflow-auto">{job.items.map((item,i)=><li key={i}>{item.path||item.source_id} · {item.status}{item.chunks?` · ${item.chunks} chunks`:''} {item.reason}</li>)}</ul></details>}
+    {(job?.last_error||job?.status==='failed'&&Boolean(job.result?.error))&&<p className="mt-2 text-amber-300">{job.last_error||String(job?.result?.error||'任务失败')}</p>}
   </div>;
 }

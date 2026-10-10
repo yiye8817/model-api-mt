@@ -17,6 +17,7 @@ import DesktopAgentPanel from './components/DesktopAgentPanel';
 import CodexTerminalPanel from './components/CodexTerminalPanel';
 import AgentDialog from './components/AgentDialog';
 import { useBackendState } from './hooks/useBackendState';
+import { useKnowledgeJobs } from './hooks/useKnowledgeJobs';
 import { hostOfUrl, isLikelyFrameBlocked, normalizeHttpUrl } from './lib/webFrame';
 import { browserFileUrl, fileTargetName, isBrowserOpenableFile, resolveFileTarget } from './lib/fileTargets';
 import { DEFAULT_MODEL_CHAT_SITES } from './lib/modelChatSites';
@@ -25,6 +26,7 @@ import { checkLocalFirst, createRequestGuard, knowledgeReasons } from './lib/kno
 import type { Completion, KnowledgeQueryRequest } from './lib/knowledgeTypes';
 import type { Citation } from './lib/knowledgeTypes';
 import KnowledgePanel from './components/KnowledgePanel';
+import ContentLibraryPanel from './components/ContentLibraryPanel';
 import KnowledgeSourceViewer from './components/KnowledgeSourceViewer';
 import {
   acquireDesktopOverlay,
@@ -92,6 +94,22 @@ export default function App() {
   const requestGuardRef = useRef(createRequestGuard());
   const activeRequestRef = useRef<{id:string;targets:string[];knowledge:boolean}|null>(null);
   const [knowledgeProgress, setKnowledgeProgress] = useState('');
+  const [knowledgeJobNotice, setKnowledgeJobNotice] = useState('');
+  useKnowledgeJobs(null, { notify: true });
+  useEffect(() => {
+    const onTerminal = (event: Event) => {
+      const job = (event as CustomEvent).detail as { status?: string; config?: { name?: string }; succeeded?: number; failed?: number };
+      const name = job?.config?.name || '本地知识索引任务';
+      const message = job?.status === 'done'
+        ? `${name}已完成，成功 ${job.succeeded ?? 0} 项。`
+        : job?.status === 'cancelled' ? `${name}已取消。` : `${name}失败，失败 ${job?.failed ?? 0} 项。`;
+      setKnowledgeJobNotice(message);
+      window.setTimeout(() => setKnowledgeJobNotice(current => current === message ? '' : current), 7000);
+      if ('Notification' in window && Notification.permission === 'granted') new Notification('本地知识任务更新', { body: message });
+    };
+    window.addEventListener('knowledge-job-terminal', onTerminal);
+    return () => window.removeEventListener('knowledge-job-terminal', onTerminal);
+  }, []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [terminalVisible, setTerminalVisible] = useState(false);
   const [showProjectRunner, setShowProjectRunner] = useState(false);
@@ -100,6 +118,9 @@ export default function App() {
   const [pluginEnabled, setPluginEnabled] = useState(false);
   const [showLocalHub, setShowLocalHub] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [contentLibraryRequest, setContentLibraryRequest] = useState<{ query: string; entryId?: string } | null>(null);
+  const openContentLibrary = useCallback((query = '', entryId?: string) => setContentLibraryRequest({ query, entryId }), []);
+  const closeContentLibrary = useCallback(() => setContentLibraryRequest(null), []);
   const [showKnowledge,setShowKnowledge]=useState(false);
   const [knowledgeCitation,setKnowledgeCitation]=useState<Citation|null>(null);
   const [settingsInitialTab,setSettingsInitialTab]=useState<'model'|'knowledge'>('model');
@@ -428,11 +449,11 @@ export default function App() {
   // Electron：各类弹层打开期间保持 WebContentsView 隐藏（+ 菜单 / 配置 / 设置等）
   useEffect(() => {
     if (!getDesktop()) return;
-    const overlayOpen = showConfigModal || showLocalHub || showSettings || showKnowledge || !!knowledgeCitation || terminalVisible || showAddMenu || showProjectRunner;
+    const overlayOpen = showConfigModal || showLocalHub || showSettings || showKnowledge || !!knowledgeCitation || terminalVisible || showAddMenu || showProjectRunner || !!contentLibraryRequest;
     if (!overlayOpen) return;
     acquireDesktopOverlay();
     return () => releaseDesktopOverlay();
-  }, [showConfigModal, showLocalHub, showSettings, showKnowledge, knowledgeCitation, terminalVisible, showAddMenu, showProjectRunner]);
+  }, [showConfigModal, showLocalHub, showSettings, showKnowledge, knowledgeCitation, terminalVisible, showAddMenu, showProjectRunner, contentLibraryRequest]);
 
   // Electron：离开网页标签时卸下 WebContentsView
   useEffect(() => {
@@ -683,6 +704,7 @@ export default function App() {
       source_ids:localSettings?.selected_source_ids||[],mode:options?.webChatTargets?.length?'web':'api',
       online_target:options?.webChatTargets?.length?{kind:'web',target_ids:options.webChatTargets}:activeProvider?{kind:'api',provider_id:activeProvider.id,model:activeProvider.selectedModel}:null,
       parameters:{...settingsRef.current?.model_params},conversation_id:conversationSnapshot.id,user_message_id:userMsg.id};
+    query.bypass_saved_reuse=!!options?.resendUserId;
     const progressLabels:Record<string,string>={prepare:'理解问题',retrieval:'检索本地资料',matching:'筛选匹配内容',generate:'生成本地回答',verify:'核对证据',miss:'转在线',hit:'本地回答'};
     const poll=attemptKnowledge?window.setInterval(()=>{
       if(controller.signal.aborted||!requestGuardRef.current.isCurrent(requestId))return;
@@ -702,8 +724,8 @@ export default function App() {
       const reason=localRoute.decision==='hit'?'':localRoute.reason;
       const message:ChatMessage={id:crypto.randomUUID(),role:'assistant',timestamp:Date.now(),
         content:cancelled?'⏹️ 已停止':hit?.answer||`本地资料未能回答：${knowledgeReasons[reason]||reason}。${!activeProvider?'请配置在线模型以使用兜底。':'在线兜底未开启。'}`,
-        model:hit?.local_model,completion:{status:cancelled?'stopped':hit?'complete':'error',kind:'local',request_id:requestId,finished_at:Date.now()},
-        knowledge:hit?{request_id:requestId,origin:hit.answer_origin||'local_generated',citations:hit.citations,trace:hit.trace,local_model:hit.local_model,duration_ms:hit.duration_ms}:undefined};
+        model:hit?.local_model,completion:{status:cancelled?'stopped':hit?'complete':'error',kind:'local',request_id:requestId,finished_at:Date.now(),effective_constraints:styleConstraints},
+        knowledge:hit?{request_id:requestId,origin:hit.answer_origin||'local_generated',citations:hit.citations,trace:hit.trace,local_model:hit.local_model,duration_ms:hit.duration_ms,saved_entry:hit.saved_entry}:undefined};
       setState(prev=>({...prev,conversations:prev.conversations.map(c=>c.id===conversationSnapshot.id?{...c,messages:[...c.messages,message],updatedAt:Date.now()}:c)}));
       finish();return;
     }
@@ -2008,6 +2030,7 @@ export default function App() {
           onRefreshProviderModels={handleRefreshProviderModels}
           onAddLocalProvider={handleAddLocalProvider}
           onOpenLocalHub={() => setShowLocalHub(true)}
+          onOpenContentLibrary={() => openContentLibrary()}
           onOpenProviderSource={(url, name) => openWebTab(url, name)}
         />
 
@@ -2161,6 +2184,7 @@ export default function App() {
                 localKnowledgeEnabled={settings?.local_knowledge?.enabled}
                 knowledgeProgress={knowledgeProgress}
                 onOpenKnowledge={()=>setShowKnowledge(true)}
+                onOpenContentLibrary={openContentLibrary}
                 onOpenCitation={openKnowledgeCitation}
                 streamingContent={streamingContent}
                 injectedInput={injectedForInput?.content ?? null}
@@ -2558,6 +2582,7 @@ export default function App() {
         onSaved={(s) => setSettings(s)}
       />
 
+      {contentLibraryRequest && <ContentLibraryPanel initialQuery={contentLibraryRequest.query} initialEntryId={contentLibraryRequest.entryId} onClose={closeContentLibrary} />}
       {showKnowledge&&<div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-6"><div role="dialog" aria-label="本地资料管理" className="w-full max-w-4xl max-h-[90vh] overflow-auto bg-gray-900 border border-gray-700 rounded-xl p-5">
         <div className="flex items-center gap-3 mb-4 text-white"><h2 className="flex-1">本地资料管理</h2><button className="text-xs text-emerald-300" onClick={()=>{setShowKnowledge(false);setSettingsInitialTab('knowledge');setShowSettings(true);}}>连接设置</button><button aria-label="关闭资料管理" onClick={()=>setShowKnowledge(false)}>关闭</button></div>
         <KnowledgePanel onOpenCitation={openKnowledgeCitation}/>
@@ -2566,6 +2591,7 @@ export default function App() {
         <div className="flex mb-4 text-white"><h2 className="flex-1">{knowledgeCitation.title}</h2><button aria-label="关闭引用来源" onClick={()=>setKnowledgeCitation(null)}>关闭</button></div>
         <KnowledgeSourceViewer sourceId={knowledgeCitation.source_id} revision={knowledgeCitation.revision} position={knowledgeCitation.position}/>
       </div></div>}
+      {knowledgeJobNotice&&<div role="status" className="fixed right-5 bottom-5 z-[120] max-w-sm rounded-lg border border-emerald-700 bg-gray-900 px-4 py-3 text-sm text-emerald-200 shadow-xl">{knowledgeJobNotice}</div>}
 
       <AgentDialog
         visible={showProjectRunner}

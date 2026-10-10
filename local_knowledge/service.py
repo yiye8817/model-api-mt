@@ -13,7 +13,7 @@ from .retrieval import effective_scope
 
 class RequestRegistry:
     def __init__(self):
-        self.events={};self.active=set();self.lock=threading.RLock()
+        self.events={};self.active=set();self.deadlines={};self.lock=threading.RLock()
 
 
 class KnowledgeService:
@@ -96,6 +96,8 @@ class KnowledgeService:
             self._active.add(request_id)
             self.store.update_request(request_id,identity=identity)
         trace=[]; stage='prepare'; budget=Budget(config['local_timeout_seconds'],event)
+        with self._lock:
+            budget.deadline=min(budget.deadline,self.registry.deadlines.setdefault(request_id,budget.deadline))
         def transition(value,**extra):
             nonlocal stage
             stage=value; step={'stage':value,'status':'running',**extra}; trace.append(step)

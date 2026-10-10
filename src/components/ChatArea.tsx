@@ -6,7 +6,7 @@ import {
   Paperclip, Image, FileText, X, File as FileIcon, RotateCcw, Pencil,
   Copy, Download, FolderPlus, Volume2, StopCircle, Puzzle, Globe, ThumbsUp, Wand2, Server,
   Settings as SettingsIcon, Link2, ChevronRight, ChevronDown, MessagesSquare,
-  CheckCircle2, XCircle, Loader, AlertTriangle, Sparkle, FileCode2, PlayCircle, Hammer,
+  CheckCircle2, XCircle, Loader, AlertTriangle, Sparkle, FileCode2, PlayCircle, Hammer, BookOpen,
 } from 'lucide-react';
 import MarkdownRenderer from './MarkdownRenderer';
 import RichContentRenderer from './RichContentRenderer';
@@ -18,6 +18,7 @@ interface Props {
   localKnowledgeEnabled?: boolean;
   knowledgeProgress?: string;
   onOpenKnowledge?: () => void;
+  onOpenContentLibrary?: (query?: string, entryId?: string) => void;
   onOpenCitation?: (citation:Citation) => void;
   conversation: Conversation | null;
   provider: APIProvider | null;
@@ -61,7 +62,7 @@ function formatFileSize(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-export default function ChatArea({ conversation, provider, onSendMessage, isLoading, streamingContent, injectedInput, injectedAttachments, onInjectedInputConsumed, onResend, onEditUserMessage, onLikeMessage, pluginEnabled, onPluginEnabledChange, onPluginRun, onPluginChat, onPluginReloadCode, onOpenSettings, isBusy, onStop, autoRouteEnabled, onAutoRouteEnabledChange, agentRequest, onAgentRequestConsumed, webChatTargets = [], webChatAggregator, onWebChatSelectionChange, onOpenWebChatSite, onOpenUrl, localKnowledgeEnabled, knowledgeProgress, onOpenKnowledge, onOpenCitation }: Props) {
+export default function ChatArea({ conversation, provider, onSendMessage, isLoading, streamingContent, injectedInput, injectedAttachments, onInjectedInputConsumed, onResend, onEditUserMessage, onLikeMessage, pluginEnabled, onPluginEnabledChange, onPluginRun, onPluginChat, onPluginReloadCode, onOpenSettings, isBusy, onStop, autoRouteEnabled, onAutoRouteEnabledChange, agentRequest, onAgentRequestConsumed, webChatTargets = [], webChatAggregator, onWebChatSelectionChange, onOpenWebChatSite, onOpenUrl, localKnowledgeEnabled, knowledgeProgress, onOpenKnowledge, onOpenCitation, onOpenContentLibrary }: Props) {
   const busy = !!(isBusy ?? isLoading);
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
@@ -379,6 +380,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
                 onStop={onStop}
                 onOpenUrl={onOpenUrl}
                 onOpenCitation={onOpenCitation}
+                onOpenContentLibrary={onOpenContentLibrary}
               />
             );
           })}
@@ -466,6 +468,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
             </div>
           )}
 
+          {onOpenContentLibrary && <button type="button" onClick={() => onOpenContentLibrary(input.trim())} className="mb-2 flex items-center gap-1.5 text-xs text-cyan-400 hover:text-cyan-200"><BookOpen size={14} />查找已保存内容 · 判定输入意图</button>}
           <div className="flex gap-2 items-end">
             <div className="relative flex gap-1 shrink-0">
               {onAutoRouteEnabledChange != null && (
@@ -1390,9 +1393,11 @@ function MessageBubble({
   onStop,
   onOpenUrl,
   onOpenCitation,
+  onOpenContentLibrary,
 }: {
   message: ChatMessage;
   onOpenCitation?: (citation:Citation) => void;
+  onOpenContentLibrary?: (query?: string, entryId?: string) => void;
   conversationId: string;
   previousUserMessage?: ChatMessage;
   isError: boolean;
@@ -1448,7 +1453,12 @@ function MessageBubble({
           <div className="text-gray-200 whitespace-pre-wrap text-sm leading-relaxed">{message.content}</div>
         ) : (
           <>
-            {message.knowledge&&message.completion?.status==='complete'&&<div className="text-xs text-emerald-300 mb-2">{message.knowledge.origin==='validated_cache'?'历史问答复用':message.knowledge.origin==='local_generated'?'本地资料回答':'在线回答'}</div>}
+            {message.knowledge&&message.completion?.status==='complete'&&<div className="text-xs text-emerald-300 mb-2">{message.knowledge.origin==='validated_cache'||message.knowledge.origin==='saved_answer'?'已保存问答复用':message.knowledge.origin==='local_generated'?'本地资料回答':'在线回答'}
+              {message.knowledge.saved_entry && <button
+                className="ml-2 underline text-cyan-300"
+                onClick={() => onOpenContentLibrary?.(previousUserMessage?.content || '', message.knowledge?.saved_entry?.id)}
+              >来源：{message.knowledge.saved_entry.source_name || '历史回答'} · {message.knowledge.saved_entry.fact_status==='correct'?'人工标记正确':'未人工核验'}</button>}
+            </div>}
             {message.autoRoute && <AutoRouteBadge info={message.autoRoute} />}
             {message.research && <ResearchPanel info={message.research} />}
             <div className="select-text [&_*]:select-text">
@@ -1513,6 +1523,11 @@ function MessageBubble({
               onLikeMessage={onLikeMessage}
             />
           )}
+          {!isUser && !isError && !busy && onOpenContentLibrary && <button
+            onClick={() => onOpenContentLibrary(previousUserMessage?.content || '', `history:${conversationId}:${message.id}`)}
+            className="text-xs text-cyan-400 hover:text-cyan-200 flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-700"
+            title="标注此回答的来源与事实状态"
+          ><BookOpen size={13} />来源 / 核验</button>}
         </div>
       </div>
     </div>

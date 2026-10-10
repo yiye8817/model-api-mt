@@ -15,6 +15,7 @@ from .parsers import ParseError
 from .ingest import check_file_freshness
 from .chat_sync import turn_hash
 from .text import keyword_tokens
+from .provider_clients import Budget as ProviderBudget, ProviderModelClient, provider_catalog
 
 
 def validate_query(value):
@@ -30,13 +31,16 @@ def validate_query(value):
     return value
 
 
-def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtime=None):
+def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtime=None,get_providers=None):
     bp=Blueprint('local_knowledge',__name__,url_prefix='/api/knowledge')
     def components():
         if runtime is None: return service,imports,evaluations,sync
         instance=runtime() if callable(runtime) else runtime
         return instance.components()
     def runtime_instance(): return runtime() if callable(runtime) else runtime
+    def providers():
+        value = get_providers() if callable(get_providers) else (get_providers or [])
+        return value if isinstance(value, list) else []
     def source_or_404(source_id):
         source=components()[0].store.get_source(source_id)
         if not source or source.status=='deleted': raise KeyError(source_id)
@@ -61,7 +65,32 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
     @bp.post('/probe')
     def probe():
         s,*_=components()
+        data=request.get_json(silent=True) or {}
+        # Provider probes are intentionally independent from the local-model
+        # probe and never return credentials or raw gateway response bodies.
+        role=data.get('role')
+        if role in ('embedding','rerank') and (data.get('source') == 'provider' or data.get('provider_id')):
+            provider=next((p for p in providers() if isinstance(p,dict) and p.get('id')==data.get('provider_id')),None)
+            if provider is None: raise ValueError('Provider 不存在')
+            model=data.get('model')
+            allowed=provider_catalog([provider])[0]
+            models=allowed['embedding_models'] if role=='embedding' else allowed['rerank_models']
+            if not isinstance(model,str) or not model.strip(): raise ValueError('Provider 模型不能为空')
+            if models and model not in models: raise ValueError('所选模型不属于该 Provider 能力列表')
+            if not models and provider.get('models') and model not in provider.get('models',[]):
+                raise ValueError('所选模型不属于该 Provider 模型列表')
+            client=ProviderModelClient(provider,role,model,data.get('path',''))
+            try:
+                return jsonify(client.probe(ProviderBudget(s.settings()['local_timeout_seconds'],threading.Event())))
+            except (ModelUnavailable, LocalTimeout) as exc:
+                return jsonify(ok=False, role=role, model=model, error=str(exc)), 502
+        if role and role not in ('embedding','rerank','qa'):
+            raise ValueError('role 必须是 embedding、rerank 或 qa')
         return jsonify(roles=s.models.probe(Budget(s.settings()['local_timeout_seconds'],threading.Event())))
+
+    @bp.get('/providers')
+    def provider_list():
+        return jsonify(providers=provider_catalog(providers()))
 
     @bp.post('/config/validate')
     def validate_imported_config():
@@ -144,6 +173,21 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
                 s.store.update_job(job_id,status='done',phase='done')
             imp.jobs.submit(job,run)
         return jsonify(job_id=job),202
+
+    @bp.get('/jobs')
+    def jobs():
+        s,imp,*_=components()
+        limit=request.args.get('limit',20,type=int)
+        if type(limit) is not int or not 1<=limit<=100: raise ValueError('limit must be between 1 and 100')
+        rows=[]
+        for source in s.store.active_jobs():
+            rows.append(source)
+        # Include recent terminal tasks so reopening the panel can show the
+        # completion result and deduplicate the browser notification.
+        with s.store.connection as conn:
+            ids=[row['id'] for row in conn.execute("SELECT id FROM index_jobs ORDER BY json_extract(body,'$.updated_at') DESC LIMIT ?",(limit,))]
+        rows=[s.store.job(job_id) for job_id in ids if s.store.job(job_id)]
+        return jsonify(jobs=rows[:limit])
 
     @bp.get('/jobs/<job_id>')
     def job_status(job_id): return jsonify(job=components()[1].snapshot(job_id))

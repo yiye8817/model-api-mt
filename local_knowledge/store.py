@@ -55,8 +55,29 @@ def _normalise_job(job, now=None):
     for key in MONOTONIC_PROGRESS_KEYS:
         value = job.get(key, 0)
         job[key] = value if type(value) is int and value >= 0 else 0
-    if job.get('status') in TERMINAL_JOB_STATUSES and job['finished_at'] is None:
-        job['finished_at'] = job['updated_at']
+    total = max(job.get('total', 0) or 0, 0)
+    completed = max(job.get('completed', 0) or 0, 0)
+    if job.get('status') == 'done':
+        job['percent'] = 100.0
+    elif total:
+        item_part = min(1.0, completed / total) * 40.0
+        chunk_part = (min(1.0, job['chunks_completed'] / job['chunks_total']) * 40.0
+                      if job['chunks_total'] else 0.0)
+        batch_part = (min(1.0, job['batches_completed'] / job['batches_total']) * 20.0
+                      if job['batches_total'] else 0.0)
+        job['percent'] = round(min(99.9, item_part + chunk_part + batch_part), 1)
+    else:
+        job['percent'] = 0.0
+    elapsed = max(0.0, now - (job.get('started_at') or now))
+    job['elapsed_seconds'] = round(elapsed, 1)
+    if job['percent'] > 0 and job['percent'] < 100 and elapsed > 0:
+        job['eta_seconds'] = round(elapsed * (100 - job['percent']) / job['percent'], 1)
+    else:
+        job['eta_seconds'] = None
+    if job.get('status') in TERMINAL_JOB_STATUSES:
+        job['stage'] = job['status']
+        if job['finished_at'] is None:
+            job['finished_at'] = job['updated_at']
     return job
 
 

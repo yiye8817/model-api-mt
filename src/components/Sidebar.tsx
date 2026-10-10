@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Plus, Settings, MessageSquare, Trash2, Edit2,
   ChevronDown, Server, PanelLeftClose, PanelLeft,
-  Terminal, ExternalLink, RefreshCw, Loader2, Cpu,
+  Terminal, ExternalLink, RefreshCw, Loader2, Cpu, BookOpen,
 } from 'lucide-react';
 import type { APIProvider, Conversation } from '../types';
 
@@ -25,6 +25,7 @@ interface Props {
   onRefreshProviderModels?: (providerId: string) => Promise<void> | void;
   onAddLocalProvider?: (port: string, host?: string) => Promise<void> | void;
   onOpenLocalHub?: () => void;
+  onOpenContentLibrary?: () => void;
   /** 在应用内中部标签页打开 Provider 来源 URL */
   onOpenProviderSource?: (url: string, title?: string) => void;
 }
@@ -48,6 +49,7 @@ export default function Sidebar({
   onRefreshProviderModels,
   onAddLocalProvider,
   onOpenLocalHub,
+  onOpenContentLibrary,
   onOpenProviderSource,
 }: Props) {
   const [showProviders, setShowProviders] = useState(true);
@@ -105,6 +107,7 @@ export default function Sidebar({
         <button onClick={() => onOpenConfig()} className="text-gray-400 hover:text-white p-2">
           <Settings size={20} />
         </button>
+        <button onClick={onOpenContentLibrary} className="text-cyan-400 hover:text-cyan-200 p-2" title="内容库" aria-label="内容库"><BookOpen size={20} /></button>
         <div className="flex-1" />
         <button
           onClick={onToggleTerminal}
@@ -143,6 +146,7 @@ export default function Sidebar({
           <Plus size={18} />
           New Chat
         </button>
+        <button onClick={onOpenContentLibrary} className="mt-2 w-full flex items-center justify-center gap-2 border border-cyan-900 bg-cyan-950/30 hover:bg-cyan-950/60 text-cyan-300 py-2 rounded-lg text-sm"><BookOpen size={17} />内容库</button>
       </div>
 
       {/* Provider Selector */}

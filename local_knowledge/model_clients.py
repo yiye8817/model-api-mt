@@ -11,7 +11,7 @@ import time
 from dataclasses import replace
 from urllib.parse import urlsplit
 
-from .config import validate_config, model_fingerprint, qa_configured
+from .config import validate_config, model_fingerprint, qa_configured, stable_hash
 
 
 class ModelUnavailable(RuntimeError):
@@ -119,13 +119,49 @@ def validate_json(value, schema):
 
 
 class ModelClients:
-    def __init__(self, config):
+    def __init__(self, config, providers=None):
         self.config = validate_config(config)
         self.dimension = None
+        self.provider_clients = {}
+        provider_rows = providers() if callable(providers) else (providers or [])
+        if not isinstance(provider_rows, list):
+            provider_rows = []
+        from .provider_clients import ProviderModelClient
+        for role in ('embedding', 'rerank'):
+            endpoint = self.config[role + '_endpoint']
+            if endpoint.get('source', 'custom') != 'provider':
+                continue
+            provider = next((item for item in provider_rows if isinstance(item, dict)
+                             and item.get('id') == endpoint.get('provider_id')), None)
+            if provider is None:
+                raise ModelUnavailable(f'{role} Provider 不存在')
+            self.provider_clients[role] = ProviderModelClient(
+                provider, role, endpoint['model'], endpoint.get('path', ''))
 
     @property
     def fingerprint(self):
-        return model_fingerprint(self.config, self.dimension)
+        base = model_fingerprint(self.config, self.dimension)
+        if not self.provider_clients:
+            return base
+        providers = {role: {'id': client.provider.get('id'),
+                            'baseUrl': client.provider.get('baseUrl') or client.provider.get('base_url'),
+                            'apiType': client.provider.get('apiType') or client.provider.get('api_type'),
+                            'model': client.model, 'path': client.path}
+                    for role, client in self.provider_clients.items()}
+        return stable_hash({'base': base, 'providers': providers})
+
+    @property
+    def vector_fingerprint(self):
+        """Fingerprint used for persistent vectors, excluding Provider keys."""
+        endpoint = self.config['embedding_endpoint']
+        provider = self.provider_clients.get('embedding')
+        details = None if provider is None else {
+            'id': provider.provider.get('id'),
+            'baseUrl': provider.provider.get('baseUrl') or provider.provider.get('base_url'),
+            'apiType': provider.provider.get('apiType') or provider.provider.get('api_type'),
+            'model': provider.model, 'path': provider.path,
+        }
+        return stable_hash({'endpoint': endpoint, 'provider': details})
 
     def _call(self, role, path, payload, budget):
         budget.check()
@@ -166,6 +202,12 @@ class ModelClients:
     def embed(self, texts, budget):
         if not texts:
             return []
+        provider = self.provider_clients.get('embedding')
+        if provider is not None:
+            vectors = provider.embed(texts, budget)
+            if vectors:
+                self.dimension = provider.dimension
+            return vectors
         data = self._call('embedding','/v1/embeddings', {'model':self.config['embedding_endpoint']['model'], 'input':list(texts)}, budget)
         rows = data.get('data')
         if not isinstance(rows, list) or len(rows) != len(texts):
@@ -187,6 +229,14 @@ class ModelClients:
     def rerank(self, question, candidates, budget):
         if not candidates:
             return []
+        provider = self.provider_clients.get('rerank')
+        if provider is not None:
+            scores = provider.rerank(question, [c.chunk.text for c in candidates], budget)
+            ranked = [replace(candidate, raw_score=score, score=score,
+                              score_transform='identity')
+                      for candidate, score in zip(candidates, scores)]
+            ranked.sort(key=lambda c: (-c.score, c.chunk.id))
+            return [replace(candidate, rank=index + 1) for index, candidate in enumerate(ranked)]
         e = self.config['rerank_endpoint']
         data = self._call('rerank', '/v1/rerank', {'model':e['model'], 'query':question, 'documents':[c.chunk.text for c in candidates], 'top_n':len(candidates)}, budget)
         if 'results' in data and 'data' not in data:
