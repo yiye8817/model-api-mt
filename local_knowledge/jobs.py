@@ -23,7 +23,9 @@ class JobQueue:
             job_id,callback=task
             try: callback(job_id)
             except Exception as exc:
-                self.store.update_job(job_id,status='failed',phase='failed',result={'error':str(exc)[:300]})
+                message = str(exc)[:300]
+                self.store.update_job(job_id, status='failed', phase='failed', last_error=message,
+                                      result={'error': message})
             finally: self.queue.task_done()
 
     def close(self):

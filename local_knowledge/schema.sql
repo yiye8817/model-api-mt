@@ -24,4 +24,4 @@ CREATE TABLE IF NOT EXISTS online_calls (
  PRIMARY KEY(request_id,call_id)
 );
 CREATE TABLE IF NOT EXISTS evaluation_profiles (id TEXT PRIMARY KEY, body TEXT NOT NULL);
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;

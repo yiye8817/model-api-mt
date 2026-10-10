@@ -19,6 +19,47 @@ def dumps(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
+TERMINAL_JOB_STATUSES = frozenset(('done', 'failed', 'cancelled'))
+JOB_PROGRESS_DEFAULTS = {
+    'stage': 'queued',
+    'current_item': '',
+    'bytes_total': 0,
+    'bytes_completed': 0,
+    'chunks_total': 0,
+    'chunks_completed': 0,
+    'batches_total': 0,
+    'batches_completed': 0,
+    'started_at': None,
+    'updated_at': None,
+    'finished_at': None,
+    'last_error': '',
+    'notification_key': '',
+}
+MONOTONIC_PROGRESS_KEYS = frozenset((
+    'bytes_total', 'bytes_completed', 'chunks_total', 'chunks_completed',
+    'batches_total', 'batches_completed',
+))
+
+
+def _normalise_job(job, now=None):
+    now = time.time() if now is None else now
+    for key, default in JOB_PROGRESS_DEFAULTS.items():
+        if key not in job:
+            job[key] = default
+    if job['updated_at'] is None:
+        job['updated_at'] = now
+    if job['started_at'] is None:
+        job['started_at'] = job['updated_at']
+    if not job['notification_key']:
+        job['notification_key'] = stable_hash(['knowledge-job', job.get('id', ''), job.get('kind', '')])[:24]
+    for key in MONOTONIC_PROGRESS_KEYS:
+        value = job.get(key, 0)
+        job[key] = value if type(value) is int and value >= 0 else 0
+    if job.get('status') in TERMINAL_JOB_STATUSES and job['finished_at'] is None:
+        job['finished_at'] = job['updated_at']
+    return job
+
+
 class Store:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
@@ -29,6 +70,7 @@ class Store:
         try:
             conn.executescript(Path(__file__).with_name('schema.sql').read_text())
             self._init_fts(conn)
+            self._migrate_jobs(conn)
         except sqlite3.Error as exc:
             conn.close()
             self._local.connection = None
@@ -36,6 +78,17 @@ class Store:
 
     def _init_fts(self, conn):
         conn.execute('CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(chunk_id UNINDEXED, keywords, tokenize="unicode61")')
+        conn.commit()
+
+    def _migrate_jobs(self, conn):
+        """Backfill progress fields for jobs written by older builds."""
+        rows = conn.execute('SELECT id,status,body FROM index_jobs').fetchall()
+        for row in rows:
+            job = _normalise_job(json.loads(row['body']))
+            job['id'] = row['id']
+            job['status'] = row['status']
+            conn.execute('UPDATE index_jobs SET status=?,body=? WHERE id=?',
+                         (job['status'], dumps(job), row['id']))
         conn.commit()
 
     @property
@@ -155,14 +208,18 @@ class Store:
 
     def create_job(self, kind, payload):
         job_id = uuid.uuid4().hex
-        body = dict(id=job_id,kind=kind,status='queued',phase='queued',completed=0,total=0,succeeded=0,skipped=0,failed=0,cancel_requested=False,items=[],result=None,payload=payload)
+        now = time.time()
+        body = dict(id=job_id, kind=kind, status='queued', phase='queued', completed=0, total=0,
+                    succeeded=0, skipped=0, failed=0, cancel_requested=False, items=[], result=None,
+                    payload=payload, **{**JOB_PROGRESS_DEFAULTS, 'started_at': now, 'updated_at': now})
+        _normalise_job(body, now)
         with self.connection as conn:
             conn.execute('INSERT INTO index_jobs VALUES(?,?,?)', (job_id,'queued',dumps(body)))
         return job_id
 
     def job(self, job_id):
         row = self.connection.execute('SELECT body FROM index_jobs WHERE id=?', (job_id,)).fetchone()
-        return json.loads(row['body']) if row else None
+        return _normalise_job(json.loads(row['body'])) if row else None
 
     def update_job(self, job_id, **changes):
         with self._lock, self.connection as conn:
@@ -170,11 +227,52 @@ class Store:
             if job is None:
                 raise KeyError(job_id)
             job.update(changes)
+            now = time.time()
+            if 'phase' in changes and 'stage' not in changes and job['status'] not in TERMINAL_JOB_STATUSES:
+                job['stage'] = changes['phase']
+            if job['status'] in TERMINAL_JOB_STATUSES:
+                job['stage'] = job['status']
+                job['finished_at'] = job.get('finished_at') or now
+            job['updated_at'] = now
+            _normalise_job(job, now)
             conn.execute('UPDATE index_jobs SET status=?,body=? WHERE id=?', (job['status'],dumps(job),job_id))
             return job
 
+    def update_job_progress(self, job_id, patch):
+        if not isinstance(patch, dict):
+            raise ValueError('Job progress patch must be an object')
+        with self._lock, self.connection as conn:
+            job = self.job(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            now = time.time()
+            if job['status'] not in TERMINAL_JOB_STATUSES:
+                for key, value in patch.items():
+                    if key not in JOB_PROGRESS_DEFAULTS:
+                        continue
+                    if key in MONOTONIC_PROGRESS_KEYS:
+                        if type(value) is not int or value < 0:
+                            raise ValueError(f'{key} must be a non-negative integer')
+                        job[key] = max(job.get(key, 0), value)
+                    elif key in ('stage', 'current_item', 'last_error'):
+                        if not isinstance(value, str):
+                            raise ValueError(f'{key} must be a string')
+                        job[key] = value
+                    elif key == 'finished_at':
+                        job[key] = value
+            job['updated_at'] = now
+            _normalise_job(job, now)
+            conn.execute('UPDATE index_jobs SET status=?,body=? WHERE id=?', (job['status'], dumps(job), job_id))
+            return job
+
+    def active_jobs(self):
+        rows = self.connection.execute(
+            "SELECT body FROM index_jobs WHERE status NOT IN ('done','failed','cancelled') ORDER BY json_extract(body, '$.updated_at') DESC"
+        )
+        return [_normalise_job(json.loads(row['body'])) for row in rows]
+
     def unfinished_jobs(self):
-        return [json.loads(r['body']) for r in self.connection.execute("SELECT body FROM index_jobs WHERE status NOT IN ('done','failed','cancelled')")]
+        return self.active_jobs()
 
     def request(self, request_id):
         row = self.connection.execute('SELECT body FROM request_runs WHERE id=?', (request_id,)).fetchone()
