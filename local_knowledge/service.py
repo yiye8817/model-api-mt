@@ -9,7 +9,7 @@ from .contracts import QueryResult, Citation, Position
 from .ingest import check_file_freshness
 from .matching import Matcher, EvidenceError
 from .model_clients import Budget, Cancelled, LocalTimeout, ModelUnavailable
-from .retrieval import effective_scope, keyword_search
+from .retrieval import effective_scope, keyword_search, keyword_phrase_search
 
 
 class RequestRegistry:
@@ -76,7 +76,8 @@ class KnowledgeService:
         question = str(request.get('question') or '').strip()
         if len(question) > 160 or len(re.findall(r'[A-Za-z0-9\u3400-\u9fff]+', question)) < 2:
             return None
-        ids = keyword_search(self.store, question, scope, limit=8)
+        ids = list(dict.fromkeys(keyword_phrase_search(self.store, question, scope, limit=8)
+                             + keyword_search(self.store, question, scope, limit=8)))
         if not ids:
             return None
         query_tokens = set(re.findall(r'[a-z0-9]+|[\u3400-\u9fff]', question.casefold()))

@@ -20,6 +20,16 @@ def test_chinese_and_version_keyword_search(tmp_path):
     assert results[0] in [c.id for c in store.visible_chunks(['s0'])]
 
 
+def test_literal_heading_phrase_search_is_available(tmp_path):
+    from local_knowledge.retrieval import keyword_phrase_search
+    from local_knowledge.contracts import Source, Chunk
+    from local_knowledge.store import Store
+    store=Store(tmp_path)
+    store.upsert_pending(Source('s',content_hash='v'),[Chunk('c',text='<h3>Transactional Memory Operations</h3>',keyword_text='transactional memory operations')])
+    store.activate_revision('s',1)
+    assert keyword_phrase_search(store,'Transactional Memory Operations',['s'],20)
+
+
 def test_fts_punctuation_is_escaped(tmp_path):
     from local_knowledge.retrieval import keyword_search
     store=setup_sources(tmp_path)

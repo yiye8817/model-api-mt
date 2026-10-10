@@ -1,3 +1,5 @@
+import re
+
 from .contracts import Candidate
 from .model_clients import ModelUnavailable
 from .text import keyword_tokens
@@ -22,6 +24,23 @@ def keyword_search(store,question,source_ids,limit=20):
       AND c.status='indexed' AND c.revision=s.revision AND s.id IN ({placeholders})
       ORDER BY score,chunks_fts.chunk_id LIMIT ?"""
     return [r['chunk_id'] for r in store.connection.execute(sql,[query,*source_ids,limit])]
+
+
+def keyword_phrase_search(store, question, source_ids, limit=20):
+    """Find chunks containing the literal multi-token heading phrase."""
+    if not source_ids:
+        return []
+    tokens = keyword_tokens(question)
+    if len(tokens) < 2 or any(not re.fullmatch(r'[a-z0-9_.-]+', token) for token in tokens):
+        return []
+    phrase = '"' + ' '.join(token.replace('"', '""') for token in tokens) + '"'
+    placeholders = ','.join('?' for _ in source_ids)
+    sql = f"""SELECT chunks_fts.chunk_id FROM chunks_fts
+      JOIN chunks c ON c.id=chunks_fts.chunk_id JOIN sources s ON s.id=c.source_id
+      WHERE chunks_fts MATCH ? AND s.enabled=1 AND s.status='indexed'
+      AND c.status='indexed' AND c.revision=s.revision AND s.id IN ({placeholders})
+      LIMIT ?"""
+    return [r['chunk_id'] for r in store.connection.execute(sql, [phrase, *source_ids, limit])]
 
 
 def reciprocal_rank_fusion(first,second,limit=20):
