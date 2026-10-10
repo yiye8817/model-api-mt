@@ -80,6 +80,7 @@ class KnowledgeService:
         if not ids:
             return None
         query_tokens = set(re.findall(r'[a-z0-9]+|[\u3400-\u9fff]', question.casefold()))
+        matches = []
         for chunk_id in ids:
             chunk = self.store.get_chunk(chunk_id)
             if not chunk:
@@ -91,8 +92,16 @@ class KnowledgeService:
             source = self.store.get_source(chunk.source_id)
             if not source or not source.enabled or source.status != 'indexed':
                 continue
+            exact = question.casefold() in plain.casefold()
+            matches.append((exact, len(query_tokens & plain_tokens), chunk, plain, source))
+        matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        for exact, _, chunk, plain, source in matches:
             self._check_sources([chunk], question, Budget(self.settings()['local_timeout_seconds'], threading.Event()), final=True)
-            answer = plain[:2400]
+            if exact:
+                start = max(0, plain.casefold().find(question.casefold()) - 120)
+                answer = plain[start:start + 2400]
+            else:
+                answer = plain[:2400]
             citation = Citation(source.id, source.kind, source.title, chunk.id, chunk.revision,
                                 source.locator, chunk.position, chunk.text[:2400])
             return QueryResult(request['request_id'], 'hit', answer=answer, citations=[citation],
