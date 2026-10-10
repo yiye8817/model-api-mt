@@ -1453,7 +1453,7 @@ function MessageBubble({
           <div className="text-gray-200 whitespace-pre-wrap text-sm leading-relaxed">{message.content}</div>
         ) : (
           <>
-            {message.knowledge&&message.completion?.status==='complete'&&<div className="text-xs text-emerald-300 mb-2">{message.knowledge.origin==='validated_cache'||message.knowledge.origin==='saved_answer'?'已保存问答复用':message.knowledge.origin==='local_generated'?'本地资料回答':'在线回答'}
+            {message.knowledge&&message.completion?.status==='complete'&&<div className="text-xs text-emerald-300 mb-2">{message.knowledge.origin==='validated_cache'||message.knowledge.origin==='saved_answer'?'已保存问答复用':message.knowledge.origin==='local_generated'||message.knowledge.origin==='extractive_document'?'本地资料回答':'在线回答'}
               {message.knowledge.saved_entry && <button
                 className="ml-2 underline text-cyan-300"
                 onClick={() => onOpenContentLibrary?.(previousUserMessage?.content || '', message.knowledge?.saved_entry?.id)}

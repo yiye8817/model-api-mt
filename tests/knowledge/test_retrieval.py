@@ -43,6 +43,18 @@ def test_deleted_vector_rechecked_in_sqlite(tmp_path):
     assert [c.chunk.source_id for c in results]==['s1']
 
 
+def test_keyword_retrieval_survives_embedding_service_unavailable(tmp_path):
+    from local_knowledge.retrieval import Retriever
+    from local_knowledge.model_clients import Budget, ModelUnavailable
+    store=setup_sources(tmp_path)
+    class Models:
+        config={'vector_top_k':20,'rerank_top_k':5}
+        def embed(self,*args): raise ModelUnavailable('embedding offline')
+        def rerank(self,q,candidates,budget): return candidates
+    results=Retriever(store,object(),Models()).retrieve('X-2 v1.2 保修',['s0','s1'],Budget(30,Event()),allow_degraded=True)
+    assert results and results[0].chunk.source_id=='s0'
+
+
 def test_rrf_limits_and_dedup(tmp_path):
     from local_knowledge.retrieval import reciprocal_rank_fusion
     first=[str(i) for i in range(20)]; second=list(reversed(first))

@@ -153,3 +153,30 @@ def test_optional_qa_returns_clear_miss_without_model_calls_and_preview_still_wo
     assert result.decision=='miss' and result.reason=='qa_not_configured'
     assert result.answer is None and models.calls==[]
     assert len(service.preview(request(request_id='preview')))==1
+
+
+def test_exact_document_heading_can_be_returned_locally_before_calibration(tmp_path):
+    from local_knowledge.config import default_config
+    from local_knowledge.contracts import Source, Chunk
+    from local_knowledge.store import Store
+    from local_knowledge.service import KnowledgeService
+    from local_knowledge.retrieval import Retriever
+    from local_knowledge.model_clients import Budget
+    from threading import Event
+    config=default_config(); config.update(enabled=True, evaluation_profile_id='')
+    store=Store(tmp_path)
+    text='<h3>8.2.2 Transactional Memory Operations</h3><p>Commit and abort instructions finish a transaction.</p>'
+    store.upsert_pending(Source('html',title='part8.html',content_hash='v1'),[Chunk('html-chunk',text=text)])
+    store.activate_revision('html',1)
+    class Models:
+        def __init__(self): self.config=config
+        @property
+        def fingerprint(self): return 'test-fingerprint'
+        def embed(self,*args): raise AssertionError('extractive heading lookup must not call embedding')
+    models=Models()
+    service=KnowledgeService(store,Retriever(store,object(),models),models,lambda:config)
+    result=service.query(request('Transactional Memory Operations','heading'))
+    assert result.decision=='hit'
+    assert result.answer_origin=='extractive_document'
+    assert 'Transactional Memory Operations' in result.answer
+    assert result.citations[0].source_id=='html'

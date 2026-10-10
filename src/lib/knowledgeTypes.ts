@@ -37,12 +37,12 @@ export interface KnowledgeQueryRequest {
 export interface KnowledgeQueryResult {
   request_id: string; decision: 'hit' | 'miss' | 'cancelled'; reason: string;
   answer: string | null; citations: Citation[]; trace: KnowledgeTraceStep[];
-  local_model: string; duration_ms: number; answer_origin: 'local_generated' | 'validated_cache' | 'saved_answer' | null;
+  local_model: string; duration_ms: number; answer_origin: 'local_generated' | 'validated_cache' | 'saved_answer' | 'extractive_document' | null;
   saved_entry?: { id: string; question: string; source_name: string; source_url: string; fact_status: 'correct' | 'unverified' | 'uncertain' | 'incorrect' };
   match_method?: string;
 }
 export interface KnowledgeMessage {
-  request_id: string; origin: 'local_generated' | 'validated_cache' | 'saved_answer' | 'online'; reason?: string;
+  request_id: string; origin: 'local_generated' | 'validated_cache' | 'saved_answer' | 'extractive_document' | 'online'; reason?: string;
   citations: Citation[]; trace: KnowledgeTraceStep[]; local_model?: string; duration_ms?: number;
   saved_entry?: KnowledgeQueryResult['saved_entry'];
 }

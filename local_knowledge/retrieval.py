@@ -46,19 +46,31 @@ class Retriever:
         if not source or source.revision!=revision or source.status not in ('pending','indexed'): raise ModelUnavailable('Source revision changed before publication')
         if source.status=='pending' and not self.store.activate_revision(source_id,revision): raise ModelUnavailable('Index publication failed')
 
-    def retrieve(self,question,source_ids,budget):
+    def retrieve(self,question,source_ids,budget,allow_degraded=False):
         if not source_ids: return []
         config=getattr(self.models,'config',{})
         limit=config.get('vector_top_k',20)
-        vector=self.models.embed([question],budget)[0]
-        budget.check()
-        first=self.vectors.query(vector,source_ids,limit)
         second=keyword_search(self.store,question,source_ids,limit)
+        try:
+            vector=self.models.embed([question],budget)[0]
+            budget.check()
+            first=self.vectors.query(vector,source_ids,limit)
+        except ModelUnavailable:
+            if not allow_degraded:
+                raise
+            # A document remains useful when a configured embedding service is
+            # temporarily down. FTS is the deterministic local fallback.
+            first=[]
         merged=reciprocal_rank_fusion(first,second,limit)
         visible={c.id:c for c in self.store.visible_chunks(source_ids)}
         candidates=[Candidate(visible[key]) for key in merged if key in visible]
         budget.check()
-        ranked=self.models.rerank(question,candidates,budget)
+        try:
+            ranked=self.models.rerank(question,candidates,budget)
+        except ModelUnavailable:
+            if not allow_degraded:
+                raise
+            ranked=candidates
         return ranked[:config.get('rerank_top_k',5)]
 
     def evidence_units(self,candidates,token_budget,budget):

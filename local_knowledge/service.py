@@ -1,6 +1,7 @@
 import re
 import threading
 import time
+from html import unescape
 from dataclasses import asdict, replace
 
 from .config import request_fingerprint, stable_hash, model_fingerprint, qa_configured
@@ -8,7 +9,7 @@ from .contracts import QueryResult, Citation, Position
 from .ingest import check_file_freshness
 from .matching import Matcher, EvidenceError
 from .model_clients import Budget, Cancelled, LocalTimeout, ModelUnavailable
-from .retrieval import effective_scope
+from .retrieval import effective_scope, keyword_search
 
 
 class RequestRegistry:
@@ -57,11 +58,47 @@ class KnowledgeService:
         config=self.settings();event=self._events.setdefault(request['request_id'],threading.Event());budget=Budget(config['local_timeout_seconds'],event)
         self.store.update_request(request['request_id'],stage='retrieval',trace=[{'stage':'retrieval','status':'running'}])
         scope=effective_scope(self.store,request.get('source_ids',[]),config['selected_source_ids'])
-        candidates=self.retriever.retrieve(request['question'],scope,budget)
+        candidates=self.retriever.retrieve(request['question'],scope,budget,allow_degraded=True)
         self.store.update_request(request['request_id'],stage='preview',trace=[{'stage':'preview','status':'done','candidate_count':len(candidates)}])
         return candidates
 
     def query(self,request): return self._query(request)
+
+    def _extractive_heading(self, request, scope):
+        """Return an exact document-heading hit without model dependencies.
+
+        This is deliberately narrow: it only answers short, multi-token title
+        lookups when every query token occurs in one indexed document chunk.
+        It keeps an imported HTML/text heading useful while embedding, rerank,
+        or QA services are stopped, without pretending to generate a semantic
+        answer for an arbitrary question.
+        """
+        question = str(request.get('question') or '').strip()
+        if len(question) > 160 or len(re.findall(r'[A-Za-z0-9\u3400-\u9fff]+', question)) < 2:
+            return None
+        ids = keyword_search(self.store, question, scope, limit=8)
+        if not ids:
+            return None
+        query_tokens = set(re.findall(r'[a-z0-9]+|[\u3400-\u9fff]', question.casefold()))
+        for chunk_id in ids:
+            chunk = self.store.get_chunk(chunk_id)
+            if not chunk:
+                continue
+            plain = re.sub(r'\s+', ' ', unescape(re.sub(r'<[^>]+>', ' ', chunk.text))).strip()
+            plain_tokens = set(re.findall(r'[a-z0-9]+|[\u3400-\u9fff]', plain.casefold()))
+            if not query_tokens.issubset(plain_tokens):
+                continue
+            source = self.store.get_source(chunk.source_id)
+            if not source or not source.enabled or source.status != 'indexed':
+                continue
+            self._check_sources([chunk], question, Budget(self.settings()['local_timeout_seconds'], threading.Event()), final=True)
+            answer = plain[:2400]
+            citation = Citation(source.id, source.kind, source.title, chunk.id, chunk.revision,
+                                source.locator, chunk.position, chunk.text[:2400])
+            return QueryResult(request['request_id'], 'hit', answer=answer, citations=[citation],
+                               trace=[{'stage': 'extractive_retrieval', 'status': 'done', 'method': 'keyword_heading'}],
+                               answer_origin='extractive_document')
+        return None
 
     def _query(self,request,evaluation_threshold=None,cancellation=None):
         request_id=request['request_id']; started=time.monotonic(); config=self.settings()
@@ -74,14 +111,15 @@ class KnowledgeService:
                 if value.get('decision')=='hit':
                     try:
                         if not config['enabled']:raise EvidenceError('disabled')
-                        if not qa_configured(config):raise EvidenceError('qa_not_configured')
-                        profile=self.store.profile(config['evaluation_profile_id'])
-                        if not profile or not all(profile.get(k) for k in ('passed','real_models','reviewed')) or profile.get('fingerprint')!=model_fingerprint(config,profile.get('dimension',self.models.dimension)) or previous.get('execution_fingerprint')!=profile.get('fingerprint'):
-                            raise EvidenceError('uncalibrated')
                         scope=effective_scope(self.store,request.get('source_ids',[]),config['selected_source_ids'])
                         chunks=[self.store.get_chunk(c['chunk_id']) for c in value['citations']]
                         if any(c is None or c.source_id not in scope for c in chunks):raise EvidenceError('source_changed')
                         self._check_sources(chunks,request['question'],Budget(config['local_timeout_seconds'],threading.Event()),final=True)
+                        if value.get('answer_origin') != 'extractive_document':
+                            if not qa_configured(config):raise EvidenceError('qa_not_configured')
+                            profile=self.store.profile(config['evaluation_profile_id'])
+                            if not profile or not all(profile.get(k) for k in ('passed','real_models','reviewed')) or profile.get('fingerprint')!=model_fingerprint(config,profile.get('dimension',self.models.dimension)) or previous.get('execution_fingerprint')!=profile.get('fingerprint'):
+                                raise EvidenceError('uncalibrated')
                     except EvidenceError as exc:
                         value=QueryResult(request_id,'miss',exc.reason).to_dict()
                         self.store.update_request(request_id,stage='miss',decision='miss',result=value)
@@ -107,8 +145,13 @@ class KnowledgeService:
         try:
             budget.check()
             if not config['enabled'] and evaluation_threshold is None: raise EvidenceError('disabled')
-            if not qa_configured(config): raise EvidenceError('qa_not_configured')
             scope=effective_scope(self.store,request.get('source_ids',[]),config['selected_source_ids'])
+            if scope and evaluation_threshold is None:
+                extractive=self._extractive_heading(request,scope)
+                if extractive:
+                    result=extractive
+                    return result
+            if not qa_configured(config): raise EvidenceError('qa_not_configured')
             if not scope: raise EvidenceError('empty_index')
             profile=self.store.profile(config['evaluation_profile_id']) if config['evaluation_profile_id'] else None
             if evaluation_threshold is None:
