@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Eye, EyeOff, Loader2, Wifi } from 'lucide-react';
 import type { APIProvider, ApiType } from '../types';
 import { newUuid } from '../lib/id';
+import { providerPresetFor, type ProviderPreset } from '../lib/providerPresets';
 
 interface Props {
   provider: APIProvider | null;
@@ -30,6 +31,8 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
   const [testResult, setTestResult] = useState<'ok' | 'fail' | null>(null);
   const [capabilityTesting, setCapabilityTesting] = useState(false);
   const [capabilityResult, setCapabilityResult] = useState<{ ok: boolean; embedding?: { available_models: string[]; models: { model: string; ok: boolean; error?: string }[] }; rerank?: { available_models: string[]; models: { model: string; ok: boolean; error?: string }[] }; error?: string } | null>(null);
+  const [providerPreset, setProviderPreset] = useState<ProviderPreset | null>(null);
+  const lastPresetRef = useRef('');
 
   useEffect(() => {
     if (provider) {
@@ -51,6 +54,23 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       setCapabilityResult(null);
     }
   }, [provider]);
+
+  useEffect(() => {
+    const preset = providerPresetFor(name, baseUrl);
+    setProviderPreset(preset);
+    if (!preset || lastPresetRef.current === preset.id) return;
+    lastPresetRef.current = preset.id;
+    setApiType(preset.apiType);
+    if (!embeddingModels.trim() && preset.embeddingModels.length) setEmbeddingModels(preset.embeddingModels.join(', '));
+    if (!rerankModels.trim() && preset.rerankModels.length) setRerankModels(preset.rerankModels.join(', '));
+  }, [name, baseUrl, embeddingModels, rerankModels]);
+
+  const applyProviderPreset = () => {
+    if (!providerPreset) return;
+    setApiType(providerPreset.apiType);
+    setEmbeddingModels(providerPreset.embeddingModels.join(', '));
+    setRerankModels(providerPreset.rerankModels.join(', '));
+  };
 
   const testConnection = async () => {
     if (!baseUrl.trim() || !apiKey.trim()) {
@@ -241,6 +261,10 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
               <input value={rerankModels} onChange={e=>setRerankModels(e.target.value)} placeholder="bge-reranker-v2" className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 font-mono text-xs" />
             </label>
           </div>
+          {providerPreset && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-cyan-900/70 bg-cyan-950/20 px-3 py-2">
+            <span className="text-xs text-cyan-200">识别为 {providerPreset.id}：{providerPreset.note}</span>
+            <button type="button" onClick={applyProviderPreset} className="ml-auto text-xs text-cyan-300 underline">应用推荐配置</button>
+          </div>}
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" onClick={() => void detectCapabilities()} disabled={capabilityTesting || fetchingModels || !baseUrl.trim()} className="text-xs bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white px-3 py-1.5 rounded-md flex items-center gap-1">
               {capabilityTesting && <Loader2 size={12} className="animate-spin" />}自动识别能力

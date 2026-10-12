@@ -3,6 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 import ConfigModal from './ConfigModal';
 
 describe('ConfigModal provider capability detection', () => {
+  it('suggests Qwen retrieval models and OpenAI API mode from provider name', async () => {
+    render(<ConfigModal provider={null} onSave={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText('e.g. OpenAI, Claude, DeepSeek...'), { target: { value: 'Qwen' } });
+    await waitFor(() => expect((screen.getByPlaceholderText('text-embedding-3-small') as HTMLInputElement).value).toContain('text-embedding-v3'));
+    expect((screen.getByPlaceholderText('bge-reranker-v2') as HTMLInputElement).value).toContain('gte-rerank-v2');
+  });
+
   it('fills verified embedding and rerank models from the provider probe', async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: true,
