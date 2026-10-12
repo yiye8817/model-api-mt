@@ -33,6 +33,26 @@ def _base_url(provider: dict[str, Any]) -> str:
     return value
 
 
+def _is_dashscope_provider(provider: dict[str, Any]) -> bool:
+    if provider.get('provider_kind') == 'dashscope':
+        return True
+    try:
+        host = (urlsplit(_base_url(provider)).hostname or '').lower()
+    except ProviderClientError:
+        return False
+    return 'dashscope' in host or host.endswith('qwencloudapi.com')
+
+
+def _dashscope_url(provider: dict[str, Any], role: str, model: str) -> str:
+    parsed = urlsplit(_base_url(provider))
+    origin = f'{parsed.scheme}://{parsed.netloc}'
+    if role == 'rerank' and model == 'qwen3-rerank':
+        return origin + '/compatible-api/v1/reranks'
+    if role == 'rerank':
+        return origin + '/api/v1/services/rerank/text-rerank/text-rerank'
+    return origin + '/api/v1/services/embeddings/text-embedding/text-embedding'
+
+
 def _url(provider: dict[str, Any], path: str) -> str:
     base = _base_url(provider)
     path = '/' + str(path or '').strip('/')
@@ -68,11 +88,11 @@ class ProviderModelClient:
             self.path = '/v1' + self.path if self.path.startswith('/') else '/v1/' + self.path
         self.dimension: int | None = None
 
-    def _post(self, payload: dict[str, Any], budget: Budget) -> dict[str, Any]:
+    def _post(self, payload: dict[str, Any], budget: Budget, url: str | None = None) -> dict[str, Any]:
         budget.check()
         remaining = max(0.05, budget.remaining())
         try:
-            response = requests.post(_url(self.provider, self.path), headers=_headers(self.provider),
+            response = requests.post(url or _url(self.provider, self.path), headers=_headers(self.provider),
                                      json=payload, timeout=remaining, allow_redirects=False)
         except requests.Timeout as exc:
             budget.check()
@@ -106,14 +126,19 @@ class ProviderModelClient:
     def embed(self, texts: list[str], budget: Budget) -> list[list[float]]:
         if not texts:
             return []
-        data = self._post({'model': self.model, 'input': list(texts)}, budget).get('data')
+        dashscope = _is_dashscope_provider(self.provider)
+        payload = {'model': self.model, 'input': {'texts': list(texts)}} if dashscope else {'model': self.model, 'input': list(texts)}
+        response = self._post(payload, budget, _dashscope_url(self.provider, self.role, self.model) if dashscope else None)
+        data = response.get('data')
+        if data is None and isinstance(response.get('output'), dict):
+            data = response['output'].get('embeddings')
         if not isinstance(data, list) or len(data) != len(texts):
             raise ProviderClientError('embedding 返回数量与输入不一致')
         ordered: list[list[float] | None] = [None] * len(texts)
         for position, row in enumerate(data):
             if not isinstance(row, dict):
                 raise ProviderClientError('embedding 响应条目无效')
-            index = row.get('index', position)
+            index = row.get('index', row.get('text_index', position))
             vector = row.get('embedding')
             if type(index) is not int or not 0 <= index < len(texts) or ordered[index] is not None:
                 raise ProviderClientError('embedding 响应 index 无效')
@@ -131,9 +156,16 @@ class ProviderModelClient:
     def rerank(self, query: str, documents: list[str], budget: Budget) -> list[float]:
         if not documents:
             return []
-        payload = {'model': self.model, 'query': str(query), 'documents': list(documents), 'top_n': len(documents)}
-        response = self._post(payload, budget)
-        rows = response.get('results', response.get('data'))
+        dashscope = _is_dashscope_provider(self.provider)
+        if dashscope and self.model != 'qwen3-rerank':
+            payload = {'model': self.model, 'input': {'query': str(query), 'documents': list(documents)},
+                       'parameters': {'top_n': len(documents)}}
+            response = self._post(payload, budget, _dashscope_url(self.provider, self.role, self.model))
+            rows = (response.get('output') or {}).get('results')
+        else:
+            payload = {'model': self.model, 'query': str(query), 'documents': list(documents), 'top_n': len(documents)}
+            response = self._post(payload, budget, _dashscope_url(self.provider, self.role, self.model) if dashscope else None)
+            rows = response.get('results', response.get('data'))
         if not isinstance(rows, list) or len(rows) != len(documents):
             raise ProviderClientError('rerank 返回数量与输入不一致')
         scores: list[float | None] = [None] * len(documents)

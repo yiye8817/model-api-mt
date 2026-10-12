@@ -14,7 +14,9 @@ class CapabilityServer:
                 body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
                 parent.calls.append((self.path, self.headers.get('Authorization'), body))
                 model=body.get('model')
-                if self.path.endswith('/embeddings') and model=='embed-good':
+                if self.path.endswith('/api/v1/services/rerank/text-rerank/text-rerank') and model=='gte-rerank-v2' and isinstance(body.get('input'),dict):
+                    payload={'output':{'results':[{'index':0,'relevance_score':0.9},{'index':1,'relevance_score':0.1}]}};status=200
+                elif self.path.endswith('/embeddings') and model=='embed-good':
                     payload={'data':[{'index':0,'embedding':[1.0,0.0]}]};status=200
                 elif self.path.endswith('/rerank') and model=='rerank-good':
                     payload={'results':[{'index':0,'relevance_score':0.9},{'index':1,'relevance_score':0.1}]};status=200
@@ -75,3 +77,16 @@ def test_server_provider_catalog_reads_saved_providers(tmp_path, monkeypatch):
     assert response.status_code==200
     assert response.get_json()['providers'][0]['id']=='p-qwen'
     assert 'secret' not in response.get_data(as_text=True)
+
+
+def test_dashscope_gte_rerank_uses_service_endpoint_and_nested_protocol(capability_server, monkeypatch):
+    from local_knowledge import provider_clients
+    from local_knowledge.model_clients import Budget
+    import threading
+    monkeypatch.setattr(provider_clients, '_is_dashscope_provider', lambda provider: True)
+    client=provider_clients.ProviderModelClient({'baseUrl':capability_server.url+'/compatible-mode/v1','apiKey':'key'}, 'rerank', 'gte-rerank-v2')
+    scores=client.rerank('query',['doc-a','doc-b'],Budget(10,threading.Event()))
+    assert scores==[0.9,0.1]
+    path,_,body=capability_server.calls[-1]
+    assert path.endswith('/api/v1/services/rerank/text-rerank/text-rerank')
+    assert body['input']=={'query':'query','documents':['doc-a','doc-b']}
