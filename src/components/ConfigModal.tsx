@@ -28,6 +28,8 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
   const [error, setError] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<'ok' | 'fail' | null>(null);
+  const [capabilityTesting, setCapabilityTesting] = useState(false);
+  const [capabilityResult, setCapabilityResult] = useState<{ ok: boolean; embedding?: { available_models: string[]; models: { model: string; ok: boolean; error?: string }[] }; rerank?: { available_models: string[]; models: { model: string; ok: boolean; error?: string }[] }; error?: string } | null>(null);
 
   useEffect(() => {
     if (provider) {
@@ -42,9 +44,11 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       setSelectedModel(provider.selectedModel);
       setEmbeddingModels((provider.embeddingModels || []).join(', '));
       setRerankModels((provider.rerankModels || []).join(', '));
+      setCapabilityResult(null);
     } else {
       setName(''); setBaseUrl(''); setApiKey(''); setSource(''); setApiType('openai');
       setIsDefault(false); setSupportsVision(false); setModels([]); setSelectedModel(''); setCustomModel(''); setEmbeddingModels(''); setRerankModels('');
+      setCapabilityResult(null);
     }
   }, [provider]);
 
@@ -87,10 +91,10 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
     }
   };
 
-  const fetchModels = async () => {
+  const fetchModels = async (): Promise<string[]> => {
     if (!baseUrl || !apiKey) {
       setError('Please enter Base URL and API Key first');
-      return;
+      return [];
     }
     setFetchingModels(true);
     setError('');
@@ -110,7 +114,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
         // HTTP errors came from the Python proxy/provider.  Do not append the
         // generic "backend is not running" hint to a provider auth failure.
         setError(errData.error || `HTTP ${res.status}`);
-        return;
+        return [];
       }
       const data = await res.json();
       const modelList = (data.models || []).sort();
@@ -118,10 +122,41 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       if (modelList.length > 0 && !selectedModel) {
         setSelectedModel(modelList[0]);
       }
+      return modelList;
     } catch (err: any) {
       setError(`Failed to fetch models: ${err.message}. Make sure Python backend (server.py) is running.`);
+      return [];
     } finally {
       setFetchingModels(false);
+    }
+  };
+
+  const detectCapabilities = async () => {
+    if (!baseUrl.trim()) { setError('请先填写 Base URL'); return; }
+    if (!apiKey.trim() && !/^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(baseUrl.trim())) {
+      setError('请先填写 API Key'); return;
+    }
+    setCapabilityTesting(true); setCapabilityResult(null); setError('');
+    try {
+      const availableModels = models.length ? models : await fetchModels();
+      if (!availableModels.length) { setError('没有可检测的模型，请先获取 Models'); return; }
+      const response = await fetch('/api/providers/capabilities/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl: baseUrl.replace(/\/+$/, ''), apiKey, apiType, models: availableModels,
+          embeddingModels: embeddingModels.split(/[,，]/).map(value => value.trim()).filter(Boolean),
+          rerankModels: rerankModels.split(/[,，]/).map(value => value.trim()).filter(Boolean),
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      setCapabilityResult(data);
+      setEmbeddingModels((data.embedding?.available_models || []).join(', '));
+      setRerankModels((data.rerank?.available_models || []).join(', '));
+    } catch (err: any) {
+      setCapabilityResult({ ok: false, error: err.message || '能力检测失败' });
+    } finally {
+      setCapabilityTesting(false);
     }
   };
 
@@ -206,7 +241,14 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
               <input value={rerankModels} onChange={e=>setRerankModels(e.target.value)} placeholder="bge-reranker-v2" className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 font-mono text-xs" />
             </label>
           </div>
-          <p className="text-xs text-gray-500">供本地知识选择和接口测试；留空时根据 Models 名称自动推断。</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => void detectCapabilities()} disabled={capabilityTesting || fetchingModels || !baseUrl.trim()} className="text-xs bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white px-3 py-1.5 rounded-md flex items-center gap-1">
+              {capabilityTesting && <Loader2 size={12} className="animate-spin" />}自动识别能力
+            </button>
+            {capabilityResult?.ok && <span className="text-xs text-emerald-300">已验证：embedding {capabilityResult.embedding?.available_models.length || 0} 个，rerank {capabilityResult.rerank?.available_models.length || 0} 个</span>}
+            {capabilityResult && !capabilityResult.ok && <span className="text-xs text-amber-300">{capabilityResult.error || '没有模型通过能力验证'}</span>}
+          </div>
+          <p className="text-xs text-gray-500">自动检测会对候选模型实际调用 /v1/embeddings 和 /v1/rerank；Key 只在服务端请求中使用。检测成功后会自动填入能力列表。</p>
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Provider 来源</label>

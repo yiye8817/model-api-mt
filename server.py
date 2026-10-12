@@ -3209,6 +3209,41 @@ def list_providers():
     return jsonify(state.get('providers', []))
 
 
+@app.route('/api/providers/capabilities/test', methods=['POST'])
+def test_provider_capabilities():
+    """Discover and verify embedding/rerank models for an unsaved provider.
+
+    The browser may send the current editor values so users can validate a
+    provider before saving it. Credentials are used only for this request and
+    are never included in the response or error text.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求必须是 JSON 对象'}), 400
+    base_url = str(data.get('baseUrl') or '').strip().rstrip('/')
+    if not base_url:
+        return jsonify({'error': 'baseUrl is required'}), 400
+    provider = {
+        'id': 'unsaved-provider',
+        'name': data.get('name') or 'Provider',
+        'baseUrl': base_url,
+        'apiKey': data.get('apiKey') or '',
+        'apiType': _norm_api_type(data.get('apiType')),
+        'models': data.get('models') if isinstance(data.get('models'), list) else [],
+        'embeddingModels': data.get('embeddingModels') if isinstance(data.get('embeddingModels'), list) else [],
+        'rerankModels': data.get('rerankModels') if isinstance(data.get('rerankModels'), list) else [],
+    }
+    provider['models'] = [str(item).strip() for item in provider['models'] if isinstance(item, str) and item.strip()][:100]
+    provider['embeddingModels'] = [str(item).strip() for item in provider['embeddingModels'] if isinstance(item, str) and item.strip()][:50]
+    provider['rerankModels'] = [str(item).strip() for item in provider['rerankModels'] if isinstance(item, str) and item.strip()][:50]
+    try:
+        from local_knowledge.provider_clients import ProviderClientError, detect_provider_capabilities
+        result = detect_provider_capabilities(provider, provider['models'], provider['embeddingModels'], provider['rerankModels'])
+    except ProviderClientError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(result)
+
+
 @app.route('/api/providers', methods=['POST'])
 def add_provider():
     """Add a new provider."""

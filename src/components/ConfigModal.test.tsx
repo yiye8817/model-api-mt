@@ -1,0 +1,22 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import ConfigModal from './ConfigModal';
+
+describe('ConfigModal provider capability detection', () => {
+  it('fills verified embedding and rerank models from the provider probe', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        embedding: { available_models: ['embed-good'], models: [{ model: 'embed-good', ok: true, dimension: 3 }] },
+        rerank: { available_models: ['rerank-good'], models: [{ model: 'rerank-good', ok: true, top_score: 0.9 }] },
+      }),
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(<ConfigModal provider={{id:'p',name:'Fixture',baseUrl:'http://fixture/v1',apiKey:'key',models:['embed-good','rerank-good'],selectedModel:'chat'} as any} onSave={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: '自动识别能力' }));
+    await waitFor(() => expect((screen.getByPlaceholderText('text-embedding-3-small') as HTMLInputElement).value).toBe('embed-good'));
+    expect((screen.getByPlaceholderText('bge-reranker-v2') as HTMLInputElement).value).toBe('rerank-good');
+    expect(fetcher).toHaveBeenCalledWith('/api/providers/capabilities/test', expect.objectContaining({ method: 'POST' }));
+  });
+});

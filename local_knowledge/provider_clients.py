@@ -5,6 +5,7 @@ short, stable errors so a remote gateway cannot echo an API key or a large
 response body into a task snapshot or browser response.
 """
 import math
+import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -166,7 +167,9 @@ def _models(provider: dict[str, Any], role: str) -> list[str]:
     if not isinstance(explicit, list):
         explicit = provider.get('embedding_models' if role == 'embedding' else 'rerank_models')
     if isinstance(explicit, list):
-        return [x.strip() for x in explicit if isinstance(x, str) and x.strip()]
+        values = [x.strip() for x in explicit if isinstance(x, str) and x.strip()]
+        if values:
+            return values
     values = provider.get('models', [])
     if not isinstance(values, list):
         return []
@@ -188,3 +191,39 @@ def provider_catalog(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
                        'configured': bool(provider.get('baseUrl')), 
                        'reason': 'Anthropic Provider 不支持 embedding/rerank' if api_type == 'anthropic' else None})
     return result
+
+
+def detect_provider_capabilities(provider: dict[str, Any], models: list[str] | None = None,
+                                 embedding_models: list[str] | None = None,
+                                 rerank_models: list[str] | None = None,
+                                 timeout: float = 20) -> dict[str, Any]:
+    """Probe candidate models and return capability results without secrets."""
+    if _api_type(provider) == 'anthropic':
+        raise ProviderClientError('Anthropic Provider 不支持 embedding/rerank 兼容接口')
+    catalog_source = dict(provider)
+    if models is not None:
+        catalog_source['models'] = models
+    embedding_candidates = list(embedding_models or _models(catalog_source, 'embedding'))[:50]
+    rerank_candidates = list(rerank_models or _models(catalog_source, 'rerank'))[:50]
+    if not embedding_candidates and not rerank_candidates:
+        raise ProviderClientError('未能从模型列表识别 embedding/rerank 候选模型')
+    event = threading.Event()
+    budget = Budget(timeout, event)
+
+    def probe_role(role: str, candidates: list[str]) -> dict[str, Any]:
+        rows=[]
+        for model in candidates:
+            try:
+                result=ProviderModelClient(provider, role, model).probe(budget)
+                rows.append({**result, 'ok': True})
+            except (ModelUnavailable, LocalTimeout) as exc:
+                rows.append({'ok': False, 'role': role, 'model': model, 'error': str(exc)})
+            except Exception as exc:
+                rows.append({'ok': False, 'role': role, 'model': model, 'error': f'接口测试失败：{type(exc).__name__}'})
+        return {'path': '/v1/embeddings' if role == 'embedding' else '/v1/rerank', 'models': rows,
+                'available_models': [row['model'] for row in rows if row.get('ok')]}
+
+    embedding = probe_role('embedding', embedding_candidates)
+    rerank = probe_role('rerank', rerank_candidates)
+    return {'ok': bool(embedding['available_models'] or rerank['available_models']),
+            'embedding': embedding, 'rerank': rerank}
