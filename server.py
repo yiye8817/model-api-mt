@@ -9688,7 +9688,10 @@ _knowledge_runtime = _KnowledgeRuntime(
     lambda: load_state()['conversations'],
     lambda: load_state().get('providers', []),
 )
-app.register_blueprint(_knowledge_blueprint(runtime=lambda: _knowledge_runtime))
+app.register_blueprint(_knowledge_blueprint(
+    runtime=lambda: _knowledge_runtime,
+    get_providers=lambda: load_state().get('providers', []),
+))
 
 
 def _knowledge_sync_after_save(conversations):

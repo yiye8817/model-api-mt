@@ -61,3 +61,17 @@ def test_provider_capability_rejects_anthropic(capability_server):
     })
     assert response.status_code==400
     assert 'Anthropic' in response.get_json()['error']
+
+
+def test_server_provider_catalog_reads_saved_providers(tmp_path, monkeypatch):
+    import server
+    providers_path=tmp_path/'providers.json'; providers_path.write_text(json.dumps([{
+        'id':'p-qwen','name':'qwen','baseUrl':'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        'apiKey':'secret','models':['qwen3.7-text-embedding'],
+    }]))
+    conversations=tmp_path/'conversations'; conversations.mkdir()
+    monkeypatch.setattr(server,'PROVIDERS_FILE',str(providers_path)); monkeypatch.setattr(server,'CONVERSATIONS_DIR',str(conversations))
+    response=server.app.test_client().get('/api/knowledge/providers')
+    assert response.status_code==200
+    assert response.get_json()['providers'][0]['id']=='p-qwen'
+    assert 'secret' not in response.get_data(as_text=True)
