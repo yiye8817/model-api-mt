@@ -3,9 +3,16 @@ import { describe, expect, it, vi } from 'vitest';
 import ConfigModal from './ConfigModal';
 
 describe('ConfigModal provider capability detection', () => {
+  it('offers common provider sources and fills provider details when selected', async () => {
+    render(<ConfigModal provider={null} onSave={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Provider Name' }), { target: { value: 'qwen' } });
+    await waitFor(() => expect((screen.getByPlaceholderText('e.g. https://api.openai.com/v1') as HTMLInputElement).value).toContain('dashscope.aliyuncs.com'));
+    expect((screen.getByPlaceholderText('text-embedding-3-small') as HTMLInputElement).value).toContain('text-embedding-v3');
+  });
+
   it('suggests Qwen retrieval models and OpenAI API mode from provider name', async () => {
     render(<ConfigModal provider={null} onSave={vi.fn()} onClose={vi.fn()} />);
-    fireEvent.change(screen.getByPlaceholderText('e.g. OpenAI, Claude, DeepSeek...'), { target: { value: 'Qwen' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Provider Name' }), { target: { value: 'qwen' } });
     await waitFor(() => expect((screen.getByPlaceholderText('text-embedding-3-small') as HTMLInputElement).value).toContain('text-embedding-v3'));
     expect((screen.getByPlaceholderText('bge-reranker-v2') as HTMLInputElement).value).toContain('gte-rerank-v2');
   });

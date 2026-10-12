@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, Eye, EyeOff, Loader2, Wifi } from 'lucide-react';
 import type { APIProvider, ApiType } from '../types';
 import { newUuid } from '../lib/id';
-import { providerPresetFor, type ProviderPreset } from '../lib/providerPresets';
+import { COMMON_PROVIDER_PRESETS, providerPresetFor, type ProviderPreset } from '../lib/providerPresets';
 
 interface Props {
   provider: APIProvider | null;
@@ -17,6 +17,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
   const [apiKey, setApiKey] = useState('');
   const [source, setSource] = useState('');
   const [apiType, setApiType] = useState<ApiType>('openai');
+  const [providerTemplate, setProviderTemplate] = useState('custom');
   const [isDefault, setIsDefault] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
@@ -41,6 +42,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       setApiKey(provider.apiKey);
       setSource(provider.source ?? '');
       setApiType(provider.apiType ?? 'openai');
+      setProviderTemplate(providerPresetFor(provider.name, provider.baseUrl)?.id || 'custom');
       setIsDefault(!!provider.isDefault);
       setSupportsVision(!!provider.supportsVision);
       setModels(provider.models);
@@ -50,6 +52,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       setCapabilityResult(null);
     } else {
       setName(''); setBaseUrl(''); setApiKey(''); setSource(''); setApiType('openai');
+      setProviderTemplate('custom');
       setIsDefault(false); setSupportsVision(false); setModels([]); setSelectedModel(''); setCustomModel(''); setEmbeddingModels(''); setRerankModels('');
       setCapabilityResult(null);
     }
@@ -58,18 +61,36 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
   useEffect(() => {
     const preset = providerPresetFor(name, baseUrl);
     setProviderPreset(preset);
-    if (!preset || lastPresetRef.current === preset.id) return;
+    if (!preset || providerTemplate === 'custom' || lastPresetRef.current === preset.id) return;
     lastPresetRef.current = preset.id;
     setApiType(preset.apiType);
     if (!embeddingModels.trim() && preset.embeddingModels.length) setEmbeddingModels(preset.embeddingModels.join(', '));
     if (!rerankModels.trim() && preset.rerankModels.length) setRerankModels(preset.rerankModels.join(', '));
-  }, [name, baseUrl, embeddingModels, rerankModels]);
+  }, [name, baseUrl, embeddingModels, rerankModels, providerTemplate]);
 
   const applyProviderPreset = () => {
     if (!providerPreset) return;
     setApiType(providerPreset.apiType);
     setEmbeddingModels(providerPreset.embeddingModels.join(', '));
     setRerankModels(providerPreset.rerankModels.join(', '));
+  };
+
+  const selectProviderTemplate = (id: string) => {
+    setProviderTemplate(id);
+    if (id === 'custom') {
+      setProviderPreset(null);
+      return;
+    }
+    const summary = COMMON_PROVIDER_PRESETS.find(item => item.id === id);
+    const preset = summary ? providerPresetFor(summary.label, summary.baseUrl) : null;
+    if (!preset) return;
+    setName(preset.label);
+    setBaseUrl(preset.baseUrl);
+    setApiType(preset.apiType);
+    setApiKey(''); setModels([]); setSelectedModel(''); setCustomModel('');
+    setEmbeddingModels(preset.embeddingModels.join(', '));
+    setRerankModels(preset.rerankModels.join(', '));
+    setCapabilityResult(null); setError('');
   };
 
   const testConnection = async () => {
@@ -244,13 +265,12 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Provider Name</label>
-            <input
-              type="text"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="e.g. OpenAI, Claude, DeepSeek..."
-              className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
+            <select aria-label="Provider Name" value={providerTemplate} onChange={e=>selectProviderTemplate(e.target.value)} className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+              <option value="custom">自定义 Provider</option>
+              {COMMON_PROVIDER_PRESETS.map(item=><option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+            {providerTemplate==='custom' && <input aria-label="自定义 Provider Name" type="text" value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. OpenAI, Claude, DeepSeek..." className="mt-2 w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" />}
+            {providerTemplate!=='custom' && <p className="mt-1 text-xs text-gray-500">已自动填入名称、Base URL 和 API 类型，可继续修改。</p>}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
