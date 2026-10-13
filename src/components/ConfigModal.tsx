@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Eye, EyeOff, Loader2, Wifi } from 'lucide-react';
 import type { APIProvider, ApiType } from '../types';
 import { newUuid } from '../lib/id';
+import { COMMON_PROVIDER_PRESETS, providerPresetFor, type ProviderPreset } from '../lib/providerPresets';
 
 interface Props {
   provider: APIProvider | null;
@@ -16,16 +17,23 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
   const [apiKey, setApiKey] = useState('');
   const [source, setSource] = useState('');
   const [apiType, setApiType] = useState<ApiType>('openai');
+  const [providerTemplate, setProviderTemplate] = useState('custom');
   const [isDefault, setIsDefault] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [models, setModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
   const [customModel, setCustomModel] = useState('');
+  const [embeddingModels, setEmbeddingModels] = useState('');
+  const [rerankModels, setRerankModels] = useState('');
   const [supportsVision, setSupportsVision] = useState(false);
   const [error, setError] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<'ok' | 'fail' | null>(null);
+  const [capabilityTesting, setCapabilityTesting] = useState(false);
+  const [capabilityResult, setCapabilityResult] = useState<{ ok: boolean; embedding?: { available_models: string[]; models: { model: string; ok: boolean; error?: string }[] }; rerank?: { available_models: string[]; models: { model: string; ok: boolean; error?: string }[] }; error?: string } | null>(null);
+  const [providerPreset, setProviderPreset] = useState<ProviderPreset | null>(null);
+  const lastPresetRef = useRef('');
 
   useEffect(() => {
     if (provider) {
@@ -34,15 +42,56 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       setApiKey(provider.apiKey);
       setSource(provider.source ?? '');
       setApiType(provider.apiType ?? 'openai');
+      setProviderTemplate(providerPresetFor(provider.name, provider.baseUrl)?.id || 'custom');
       setIsDefault(!!provider.isDefault);
       setSupportsVision(!!provider.supportsVision);
       setModels(provider.models);
       setSelectedModel(provider.selectedModel);
+      setEmbeddingModels((provider.embeddingModels || []).join(', '));
+      setRerankModels((provider.rerankModels || []).join(', '));
+      setCapabilityResult(null);
     } else {
       setName(''); setBaseUrl(''); setApiKey(''); setSource(''); setApiType('openai');
-      setIsDefault(false); setSupportsVision(false); setModels([]); setSelectedModel(''); setCustomModel('');
+      setProviderTemplate('custom');
+      setIsDefault(false); setSupportsVision(false); setModels([]); setSelectedModel(''); setCustomModel(''); setEmbeddingModels(''); setRerankModels('');
+      setCapabilityResult(null);
     }
   }, [provider]);
+
+  useEffect(() => {
+    const preset = providerPresetFor(name, baseUrl);
+    setProviderPreset(preset);
+    if (!preset || providerTemplate === 'custom' || lastPresetRef.current === preset.id) return;
+    lastPresetRef.current = preset.id;
+    setApiType(preset.apiType);
+    if (!embeddingModels.trim() && preset.embeddingModels.length) setEmbeddingModels(preset.embeddingModels.join(', '));
+    if (!rerankModels.trim() && preset.rerankModels.length) setRerankModels(preset.rerankModels.join(', '));
+  }, [name, baseUrl, embeddingModels, rerankModels, providerTemplate]);
+
+  const applyProviderPreset = () => {
+    if (!providerPreset) return;
+    setApiType(providerPreset.apiType);
+    setEmbeddingModels(providerPreset.embeddingModels.join(', '));
+    setRerankModels(providerPreset.rerankModels.join(', '));
+  };
+
+  const selectProviderTemplate = (id: string) => {
+    setProviderTemplate(id);
+    if (id === 'custom') {
+      setProviderPreset(null);
+      return;
+    }
+    const summary = COMMON_PROVIDER_PRESETS.find(item => item.id === id);
+    const preset = summary ? providerPresetFor(summary.label, summary.baseUrl) : null;
+    if (!preset) return;
+    setName(preset.label);
+    setBaseUrl(preset.baseUrl);
+    setApiType(preset.apiType);
+    setApiKey(''); setModels([]); setSelectedModel(''); setCustomModel('');
+    setEmbeddingModels(preset.embeddingModels.join(', '));
+    setRerankModels(preset.rerankModels.join(', '));
+    setCapabilityResult(null); setError('');
+  };
 
   const testConnection = async () => {
     if (!baseUrl.trim() || !apiKey.trim()) {
@@ -83,10 +132,10 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
     }
   };
 
-  const fetchModels = async () => {
+  const fetchModels = async (): Promise<string[]> => {
     if (!baseUrl || !apiKey) {
       setError('Please enter Base URL and API Key first');
-      return;
+      return [];
     }
     setFetchingModels(true);
     setError('');
@@ -106,7 +155,7 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
         // HTTP errors came from the Python proxy/provider.  Do not append the
         // generic "backend is not running" hint to a provider auth failure.
         setError(errData.error || `HTTP ${res.status}`);
-        return;
+        return [];
       }
       const data = await res.json();
       const modelList = (data.models || []).sort();
@@ -114,10 +163,41 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
       if (modelList.length > 0 && !selectedModel) {
         setSelectedModel(modelList[0]);
       }
+      return modelList;
     } catch (err: any) {
       setError(`Failed to fetch models: ${err.message}. Make sure Python backend (server.py) is running.`);
+      return [];
     } finally {
       setFetchingModels(false);
+    }
+  };
+
+  const detectCapabilities = async () => {
+    if (!baseUrl.trim()) { setError('请先填写 Base URL'); return; }
+    if (!apiKey.trim() && !/^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(baseUrl.trim())) {
+      setError('请先填写 API Key'); return;
+    }
+    setCapabilityTesting(true); setCapabilityResult(null); setError('');
+    try {
+      const availableModels = models.length ? models : await fetchModels();
+      if (!availableModels.length) { setError('没有可检测的模型，请先获取 Models'); return; }
+      const response = await fetch('/api/providers/capabilities/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl: baseUrl.replace(/\/+$/, ''), apiKey, apiType, models: availableModels,
+          embeddingModels: embeddingModels.split(/[,，]/).map(value => value.trim()).filter(Boolean),
+          rerankModels: rerankModels.split(/[,，]/).map(value => value.trim()).filter(Boolean),
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      setCapabilityResult(data);
+      setEmbeddingModels((data.embedding?.available_models || []).join(', '));
+      setRerankModels((data.rerank?.available_models || []).join(', '));
+    } catch (err: any) {
+      setCapabilityResult({ ok: false, error: err.message || '能力检测失败' });
+    } finally {
+      setCapabilityTesting(false);
     }
   };
 
@@ -143,6 +223,8 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
         isDefault,
         models: finalModels,
         selectedModel: finalModel,
+        embeddingModels: embeddingModels.split(/[,，]/).map(value => value.trim()).filter(Boolean),
+        rerankModels: rerankModels.split(/[,，]/).map(value => value.trim()).filter(Boolean),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -183,14 +265,34 @@ export default function ConfigModal({ provider, onSave, onClose }: Props) {
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Provider Name</label>
-            <input
-              type="text"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="e.g. OpenAI, Claude, DeepSeek..."
-              className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
+            <select aria-label="Provider Name" value={providerTemplate} onChange={e=>selectProviderTemplate(e.target.value)} className="w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+              <option value="custom">自定义 Provider</option>
+              {COMMON_PROVIDER_PRESETS.map(item=><option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+            {providerTemplate==='custom' && <input aria-label="自定义 Provider Name" type="text" value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. OpenAI, Claude, DeepSeek..." className="mt-2 w-full bg-gray-900 border border-gray-600 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" />}
+            {providerTemplate!=='custom' && <p className="mt-1 text-xs text-gray-500">已自动填入名称、Base URL 和 API 类型，可继续修改。</p>}
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="block text-sm text-gray-300">Embedding 模型（逗号分隔）
+              <input value={embeddingModels} onChange={e=>setEmbeddingModels(e.target.value)} placeholder="text-embedding-3-small" className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 font-mono text-xs" />
+            </label>
+            <label className="block text-sm text-gray-300">Rerank 模型（逗号分隔）
+              <input value={rerankModels} onChange={e=>setRerankModels(e.target.value)} placeholder="bge-reranker-v2" className="mt-1 w-full bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-white placeholder-gray-500 font-mono text-xs" />
+            </label>
+          </div>
+          {providerPreset && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-cyan-900/70 bg-cyan-950/20 px-3 py-2">
+            <span className="text-xs text-cyan-200">识别为 {providerPreset.id}：{providerPreset.note}</span>
+            <button type="button" onClick={applyProviderPreset} className="ml-auto text-xs text-cyan-300 underline">应用推荐配置</button>
+          </div>}
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => void detectCapabilities()} disabled={capabilityTesting || fetchingModels || !baseUrl.trim()} className="text-xs bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white px-3 py-1.5 rounded-md flex items-center gap-1">
+              {capabilityTesting && <Loader2 size={12} className="animate-spin" />}自动识别能力
+            </button>
+            {capabilityResult?.ok && <span className="text-xs text-emerald-300">已验证：embedding {capabilityResult.embedding?.available_models.length || 0} 个，rerank {capabilityResult.rerank?.available_models.length || 0} 个</span>}
+            {capabilityResult && !capabilityResult.ok && <span className="text-xs text-amber-300">{capabilityResult.error || '没有模型通过能力验证'}</span>}
+          </div>
+          <p className="text-xs text-gray-500">自动检测会对候选模型实际调用 /v1/embeddings 和 /v1/rerank；Key 只在服务端请求中使用。检测成功后会自动填入能力列表。</p>
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1.5">Provider 来源</label>

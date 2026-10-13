@@ -15,6 +15,7 @@ interface ListResp {
 }
 
 interface Props {
+  selectionMode?: 'directory' | 'file';
   initialDir: string;
   onSelect: (path: string) => void;
   onClose: () => void;
@@ -27,7 +28,8 @@ const shortcutIcon = (label: string) => {
   return <HardDrive size={12} />;
 };
 
-export default function DirPicker({ initialDir, onSelect, onClose, title = '选择工作目录' }: Props) {
+export default function DirPicker({ initialDir, onSelect, onClose, title = '选择工作目录', selectionMode = 'directory' }: Props) {
+  const [selectedFile, setSelectedFile] = useState('');
   const [resp, setResp] = useState<ListResp | null>(null);
   const [cwd, setCwd] = useState(initialDir);
   const [draft, setDraft] = useState(initialDir);
@@ -40,7 +42,8 @@ export default function DirPicker({ initialDir, onSelect, onClose, title = '选�
   const list = useCallback((dir: string) => {
     setLoading(true);
     setErr(null);
-    fetch(`/api/local/fs/list?only_dirs=1&path=${encodeURIComponent(dir)}`)
+    setSelectedFile('');
+    fetch(`/api/local/fs/list?only_dirs=${selectionMode==='directory'?1:0}&path=${encodeURIComponent(dir)}`)
       .then(async (r) => {
         const j = (await r.json().catch(() => ({}))) as ListResp;
         if (!r.ok) throw new Error(j?.error || `加载失败 (${r.status})`);
@@ -50,7 +53,7 @@ export default function DirPicker({ initialDir, onSelect, onClose, title = '选�
       })
       .catch((e) => setErr(e?.message || String(e)))
       .finally(() => setLoading(false));
-  }, []);
+  }, [selectionMode]);
 
   useEffect(() => { list(initialDir || ''); }, [initialDir, list]);
 
@@ -159,7 +162,7 @@ export default function DirPicker({ initialDir, onSelect, onClose, title = '选�
           {!err && resp?.entries.map((e) => (
             <button
               key={e.path}
-              onClick={() => list(e.path)}
+              onClick={() => e.is_dir ? list(e.path) : setSelectedFile(e.path)}
               className="w-full flex items-center gap-2 px-4 py-1.5 text-left hover:bg-gray-700/60 text-gray-200 text-sm"
               title={e.path}
             >
@@ -177,11 +180,11 @@ export default function DirPicker({ initialDir, onSelect, onClose, title = '选�
           <span className="text-[11px] text-gray-500 truncate flex-1" title={cwd}>当前：<span className="font-mono text-gray-300">{cwd}</span></span>
           <button onClick={onClose} className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm">取消</button>
           <button
-            onClick={() => onSelect(cwd)}
-            disabled={!cwd}
+            onClick={() => onSelect(selectionMode==='file'?selectedFile:cwd)}
+            disabled={selectionMode==='file'?!selectedFile:!cwd}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium disabled:opacity-40"
           >
-            <Check size={14} /> 选择此目录
+            <Check size={14} /> {selectionMode==='file'?'选择此文件':'选择此目录'}
           </button>
         </div>
       </div>

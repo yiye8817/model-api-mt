@@ -1,0 +1,4 @@
+# Optional local indexing/document parsers. No remote embedding downloads.
+chromadb>=1,<2
+pypdf>=6,<7
+python-docx>=1.2,<2

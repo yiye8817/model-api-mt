@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import re
 from pathlib import Path
 import sqlite3
 import threading
@@ -9,6 +10,11 @@ from uuid import uuid4
 
 from .datasets import convert, digest, text, url
 from .matching import APP_INTENTS, coverage, fts_query, tokens, unknown_intent
+from .reuse import normalize_question, requires_fresh_context, semantic_rank, applicable, hit, miss
+from local_knowledge.diagnostics import log_event
+from local_knowledge.intents import parse_knowledge_question,covers,topic_key
+from local_knowledge.synthesis import answer_covers
+from local_knowledge.lookup import excerpt_constraints_supported
 
 FACT_STATES = ('correct', 'unverified', 'uncertain', 'incorrect')
 
@@ -62,6 +68,10 @@ class KnowledgeStore:
                     entry_id TEXT NOT NULL, provider_id TEXT NOT NULL, model TEXT NOT NULL,
                     dimension INTEGER NOT NULL, vector TEXT NOT NULL, updated_at TEXT NOT NULL,
                     PRIMARY KEY(entry_id, provider_id, model)
+                );
+                CREATE TABLE IF NOT EXISTS semantic_vectors (
+                    entry_id TEXT NOT NULL, fingerprint TEXT NOT NULL, text_hash TEXT NOT NULL, vector TEXT NOT NULL,
+                    PRIMARY KEY(entry_id, fingerprint)
                 );
             ''')
             missing = db.execute("SELECT data FROM entries WHERE origin='public' AND id NOT IN (SELECT id FROM baseline_fts)").fetchall()
@@ -357,6 +367,108 @@ class KnowledgeStore:
                                                      'source_name': best['original_source_name']},
                 'method': 'local-baseline'}
 
+    def qa_entries(self):
+        with self.connection() as db:
+            return [self._materialize(row) for row in db.execute(
+                "SELECT e.*,a.data annotation,a.updated_at annotated_at FROM entries e "
+                "LEFT JOIN annotations a ON e.id=a.entry_id WHERE e.kind='qa' ORDER BY e.updated_at DESC,e.id")]
+
+    def _reusable(self,entry,constraints,source_valid=None):
+        return (bool(entry['question'] and entry['answer']) and entry['fact_status'] in ('correct','unverified')
+            and not entry.get('provenance_invalid') and not entry.get('derived_local')
+            and (entry.get('reusable',entry['origin']!='history') or entry['fact_status']=='correct')
+            and entry.get('system_constraints','').strip()==constraints
+            and (not entry.get('reused_entry_id') or entry['fact_status']=='correct')
+            and (source_valid is None or source_valid(entry)))
+
+    def _generation_scope_matches(self,entry,context):
+        original=entry.get('generation_context',[])
+        restricted=any(m.get('role')=='user' and re.search(r'只(?:讨论|考虑|谈)|限定|假设|\bonly\b|this scenario',m.get('content',''),re.I) for m in original)
+        return not restricted or original==(context or [])
+
+    def saved_candidates(self,question,constraints='',context=None,limit=5,semantic=False):
+        query=parse_knowledge_question(question)
+        if (not query and not semantic) or requires_fresh_context(question,context):return []
+        with self.connection() as db:
+            entries=[self._materialize(row) for row in db.execute("SELECT e.*,a.data annotation,a.updated_at annotated_at FROM entries e "
+                "LEFT JOIN annotations a ON e.id=a.entry_id WHERE e.kind='qa' AND e.origin='history' ORDER BY e.updated_at,e.id")]
+        result=[]
+        for entry in entries:
+            if not self._reusable(entry,constraints):continue
+            if not self._generation_scope_matches(entry,context):continue
+            if semantic:
+                result.append({**entry,'match_method':'semantic_candidate'})
+            else:
+                saved=parse_knowledge_question(entry['question'])
+                if saved and topic_key(saved.topic)==topic_key(query.topic) and answer_covers(entry['answer'],query):
+                    result.append({**entry,'match_method':'topic_evidence'})
+        result.sort(key=lambda e:(FACT_STATES.index(e['fact_status']),len(e.get('generation_context',[])),e['id']))
+        return result[:limit] if limit is not None else result
+
+    def reuse(self, question, constraints='', context=None, models=None, budget=None, source_valid=None, request_id='', document_lookup=None):
+        question = text(question, 'question', True, maximum=20000)
+        constraints = text(constraints, 'system_constraints')
+        context = context or []
+        if requires_fresh_context(question, context):
+            return miss('fresh_context_required')
+        # Preserve explicit ongoing user instructions instead of treating a
+        # matching topic as permission to ignore the current conversation.
+        if not excerpt_constraints_supported({'system_constraints':'','context':context}):
+            return miss('context_constraints')
+        def eligible(entry):
+            return self._reusable(entry,constraints,source_valid)
+        candidates = [entry for entry in self.qa_entries() if eligible(entry)]
+        def log_candidates(rows, method):
+            log_event('knowledge.saved_search', request_id=request_id, question=question,
+                method=method, eligible_count=len(candidates), candidate_count=len(rows),
+                candidates=[{'entry_id':entry['id'],'question':entry['question'],'quote':entry['answer'],
+                    'source_name':entry.get('source_name',''),'fact_status':entry['fact_status'],
+                    'score':entry.get('match_score')} for entry in rows[:5]])
+        if not candidates:
+            log_candidates([], 'empty')
+            return miss()
+        # A local answer may now combine both a document and saved dialogues.
+        # Probe that route even when an exact saved answer exists.
+        if document_lookup is not None and document_lookup():
+            log_candidates([], 'document_lookup_preferred')
+            return miss('document_answer_available')
+        exact = [entry for entry in candidates if normalize_question(entry['question']) == normalize_question(question)]
+        if exact:
+            exact.sort(key=lambda entry: FACT_STATES.index(entry['fact_status']))
+            log_candidates(exact, 'normalized_question')
+            # An exact saved question has already passed the user's original
+            # applicability boundary. Avoid spending the local QA budget on a
+            # second semantic check before returning a durable saved answer.
+            return hit(exact[0], 'normalized_question')
+        query=parse_knowledge_question(question)
+        subset=[entry for entry in candidates if covers(query,parse_knowledge_question(entry['question']))
+                and self._generation_scope_matches(entry,context) and answer_covers(entry['answer'],query)]
+        if subset:
+            subset.sort(key=lambda entry:FACT_STATES.index(entry['fact_status']))
+            log_candidates(subset,'intent_subset')
+            return hit(subset[0],'intent_subset')
+        if models is not None:
+            # Check a cheap indexed document definition before spending the
+            # shared local deadline on semantic matching of saved answers.
+            ranked = semantic_rank(self, question, candidates, models, budget)
+            # Model scores rank semantic applicability; manual factual status
+            # remains a separate field and is never set by this process.
+            shortlist = sorted(ranked[:5], key=lambda entry: (FACT_STATES.index(entry['fact_status']), -entry['match_score']))
+            log_candidates(shortlist, 'semantic')
+            for entry in shortlist:
+                budget.check()
+                if not applicable(question, entry, context, constraints, models, budget):
+                    continue
+                budget.check()
+                current = self.get(entry['id'])
+                if current['answer'] != entry['answer'] or current['question'] != entry['question'] or not eligible(current):
+                    return miss('source_changed')
+                budget.check()
+                return hit(current, 'semantic')
+            return miss('no_applicable_saved_answer')
+        log_candidates([], 'no_semantic_model')
+        return miss()
+
     def sync_conversations(self, conversations):
         if not isinstance(conversations, list):
             raise ValueError('conversations 必须是数组')
@@ -366,12 +478,20 @@ class KnowledgeStore:
                 if not isinstance(conv, dict) or not conv.get('id'):
                     continue
                 user = None
+                user_id = ''
+                prior = []
+                before_user = []
                 for msg in conv.get('messages', []):
                     if not isinstance(msg, dict) or not isinstance(msg.get('content'), str):
                         continue
                     if msg.get('role') == 'user':
                         user = msg['content'].strip()
+                        user_id = msg.get('id', '')
+                        before_user = list(prior)
+                        prior.append({'role': 'user', 'content': msg['content']})
                         continue
+                    if msg.get('role') in ('assistant', 'system'):
+                        prior.append({'role': msg['role'], 'content': msg['content']})
                     answer = msg['content'].strip()
                     if (msg.get('role') != 'assistant' or not msg.get('id') or not user or not answer
                             or answer.startswith(('❌', '⏹️', '🔎', '🔁'))
@@ -379,6 +499,16 @@ class KnowledgeStore:
                             or (msg.get('webChat') or {}).get('status') in ('running', 'synthesizing', 'error', 'stopped')
                             or (msg.get('pluginProgress') and not msg.get('pluginResult'))):
                         continue
+                    completion = msg.get('completion') or {}
+                    if completion.get('status') and completion['status'] != 'complete':
+                        continue
+                    from local_knowledge.chat_sync import turn_hash
+                    generation_context = completion.get('context', before_user)
+                    constraints = completion.get('effective_constraints', '')
+                    supplied_hash = completion.get('origin_hash')
+                    valid_hash = supplied_hash == turn_hash(user, answer, generation_context, constraints)
+                    context_changed = generation_context != before_user
+                    derived_local = completion.get('kind') == 'local' and (msg.get('knowledge') or {}).get('origin') != 'saved_answer'
                     sources = [s for s in msg.get('sources', []) if isinstance(s, dict)]
                     originals = [s.get('content', '') for s in sources if isinstance(s.get('content'), str)]
                     for original in (msg.get('webChat') or {}).get('answers', []):
@@ -391,7 +521,13 @@ class KnowledgeStore:
                              'title': conv.get('title', ''), 'intent': (msg.get('autoRoute') or {}).get('intent'),
                              'native_label': None, 'source_name': first.get('title') or msg.get('model') or conv.get('model') or '历史对话',
                              'source_url': first.get('url', ''), 'tags': [],
-                             'conversation_id': conv['id'], 'message_id': msg['id']}
+                             'reusable': completion.get('status') == 'complete' and completion.get('kind') in ('api', 'web') and valid_hash and not context_changed,
+                             'provenance_invalid': bool(supplied_hash and not valid_hash) or context_changed,
+                             'derived_local': derived_local, 'generation_context': generation_context, 'origin_hash': supplied_hash,
+                             'system_constraints': completion.get('effective_constraints', ''),
+                             'reused_entry_id': ((msg.get('knowledge') or {}).get('saved_entry') or {}).get('id'),
+                             'conversation_id': conv['id'], 'user_message_id': user_id, 'message_id': msg['id'],
+                             'completion_kind': completion.get('kind')}
                     desired.add(entry['id'])
                     self._upsert(db, entry)
             stale = [row['id'] for row in db.execute("SELECT id FROM entries WHERE origin='history'") if row['id'] not in desired]

@@ -2501,7 +2501,10 @@ def _build_run_wrapper(language, code, needs_sudo=False):
         os.makedirs(run_dir, exist_ok=True)
         code_file = os.path.join(run_dir, java_class + '.java')
     else:
-        code_file = prefix + '.' + ext
+        # The Bash runner itself is also a .sh file. Keep the user source
+        # separate; otherwise `bash <source>` recursively executes the
+        # wrapper and repeatedly prints the start banner forever.
+        code_file = prefix + ('.code.sh' if kind == 'bash' else '.' + ext)
     with open(code_file, 'w', encoding='utf-8') as f:
         f.write(code)
     # 交互阶段的 rc：干净、固定提示符
@@ -2882,7 +2885,10 @@ def _save_json(path, data):
 # ============================================================
 # 通用设置：LLM 参数 + Web 搜索 provider 配置
 # ============================================================
+from local_knowledge.config import default_config as _knowledge_defaults, validate_config as _validate_knowledge_config
+
 DEFAULT_SETTINGS = {
+    'local_knowledge': _knowledge_defaults(),
     'model_params': {
         'temperature': 0.7,             # 采样温度：越低越确定（0=贪婪），越高越发散
         'top_p': 1.0,                   # 核采样：保留累计概率前 top_p 的 tokens
@@ -2970,7 +2976,42 @@ def api_settings_get():
 @app.route('/api/settings', methods=['POST'])
 def api_settings_set():
     data = request.json or {}
+    previous_knowledge = _load_settings()['local_knowledge']
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Settings must be an object'}), 400
+    if 'local_knowledge' in data:
+        try:
+            candidate = _deep_merge(_load_settings()['local_knowledge'], data['local_knowledge'])
+            data['local_knowledge'] = _validate_knowledge_config(candidate)
+            # Provider-backed retrieval roles are resolved against the same
+            # persisted provider records that the chat UI uses.  Reject stale
+            # references while saving instead of silently falling back to a
+            # previous model.
+            providers = load_state().get('providers', [])
+            for role in ('embedding', 'rerank'):
+                endpoint = data['local_knowledge'][role + '_endpoint']
+                if endpoint.get('source', 'custom') != 'provider':
+                    continue
+                provider = next((p for p in providers if isinstance(p, dict) and p.get('id') == endpoint.get('provider_id')), None)
+                if provider is None:
+                    raise ValueError(f'{role} Provider 不存在，请重新选择')
+                if str(provider.get('apiType') or provider.get('api_type') or 'openai').lower() == 'anthropic':
+                    raise ValueError('Anthropic Provider 不支持 embedding/rerank 接口')
+                model = endpoint.get('model', '')
+                models = provider.get('models') if isinstance(provider.get('models'), list) else []
+                declared = provider.get('embeddingModels' if role == 'embedding' else 'rerankModels')
+                if isinstance(declared, list) and declared:
+                    models = declared
+                if not model or (models and model not in models):
+                    raise ValueError(f'{role} 模型不属于所选 Provider，请重新选择')
+        except (ValueError, TypeError) as exc:
+            return jsonify({'error': str(exc)}), 400
     cur = _save_settings(data)
+    if 'local_knowledge' in data:
+        try:
+            _knowledge_runtime.on_settings_saved(previous_knowledge, cur['local_knowledge'])
+        except Exception as exc:
+            logger.warning('Knowledge collection configuration deferred (%s)', type(exc).__name__)
     return jsonify({'ok': True, 'settings': cur})
 
 
@@ -2979,7 +3020,7 @@ def api_settings_reset():
     """重置为默认值。"""
     section = (request.json or {}).get('section')
     cur = _load_settings()
-    if section in ('model_params', 'web_search', 'model_roles', 'model_endpoints'):
+    if section in ('model_params', 'web_search', 'model_roles', 'model_endpoints', 'local_knowledge'):
         cur[section] = json.loads(json.dumps(DEFAULT_SETTINGS[section]))
     else:
         cur = json.loads(json.dumps(DEFAULT_SETTINGS))
@@ -3058,6 +3099,7 @@ def save_state(state):
                         os.remove(os.path.join(CONVERSATIONS_DIR, name))
                     except Exception as e:
                         logger.warning(f"Could not remove deleted conversation file {name}: {e}")
+        _knowledge_sync_after_save(state.get('conversations', []))
         return True
     except Exception as e:
         logger.error(f"Failed to save state: {e}")
@@ -3067,6 +3109,71 @@ def save_state(state):
 # ============================================================
 # API Routes - Full State (providers + conversations + settings)
 # ============================================================
+from knowledge.api import register_knowledge_routes
+from knowledge.bootstrap import create_store as _create_knowledge_store
+from knowledge.matching import tokens as _knowledge_tokens
+from knowledge.matching import unknown_intent as _unknown_local_intent
+
+_knowledge_store = None
+_knowledge_lock = threading.Lock()
+
+
+def _get_knowledge_store():
+    global _knowledge_store
+    with _knowledge_lock:
+        if _knowledge_store is None:
+            _knowledge_store = _create_knowledge_store(
+                os.environ.get('KNOWLEDGE_DB_PATH') or os.path.join(DATA_DIR, 'knowledge.sqlite3'))
+    return _knowledge_store
+
+
+def _saved_knowledge_for_lookup():
+    store=_get_knowledge_store()
+    store.sync_conversations(load_state().get('conversations',[]))
+    return store
+
+
+def _content_library_semantic(request_id):
+    from local_knowledge.model_clients import Budget, ModelUnavailable
+    service = _knowledge_runtime.components()[0]
+    config = service.settings()
+    if not config['enabled']:
+        raise ModelUnavailable('Local knowledge is disabled')
+    with service.registry.lock:
+        event = service.registry.events.setdefault(request_id, threading.Event())
+    budget = Budget(config['local_timeout_seconds'], event)
+    with service.registry.lock:
+        budget.deadline=min(budget.deadline,service.registry.deadlines.setdefault(request_id,budget.deadline))
+    def progress(stage):
+        service.store.update_request(request_id, stage=stage,
+            trace=[{'stage': stage, 'status': 'running', 'reason': 'saved_semantic_reuse'}])
+    def source_valid(entry):
+        if entry['origin'] != 'history':
+            return True
+        from local_knowledge.chat_sync import source_id
+        kind = 'web_synthesis' if entry.get('completion_kind') == 'web' else 'api_chat'
+        sid = source_id({'source_kind':kind,'conversation_id':entry['conversation_id'],
+                         'user_message_id':entry.get('user_message_id',''),'assistant_message_id':entry['message_id']})
+        source = service.store.get_source(sid)
+        return source is None or (source.enabled and source.status not in ('deleted','stale') and source.context_complete)
+    return service.models, budget, progress, source_valid
+
+
+def _content_library_document_lookup(data, budget):
+    from local_knowledge.retrieval import effective_scope
+    service = _knowledge_runtime.components()[0]
+    config = service.settings()
+    if not config['enabled']:
+        return False
+    scope = effective_scope(service.store, data.get('source_ids', []), config['selected_source_ids'])
+    return bool(scope and service.probe_lookup(data, scope, budget))
+
+
+register_knowledge_routes(app, _get_knowledge_store, lambda: load_state().get('conversations', []),
+                          prefix='/api/content-library', get_semantic=_content_library_semantic,
+                          get_document_lookup=_content_library_document_lookup)
+
+
 @app.route('/api/state', methods=['GET'])
 def get_state():
     """Load full app state from disk."""
@@ -3119,6 +3226,41 @@ def list_providers():
     return jsonify(state.get('providers', []))
 
 
+@app.route('/api/providers/capabilities/test', methods=['POST'])
+def test_provider_capabilities():
+    """Discover and verify embedding/rerank models for an unsaved provider.
+
+    The browser may send the current editor values so users can validate a
+    provider before saving it. Credentials are used only for this request and
+    are never included in the response or error text.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求必须是 JSON 对象'}), 400
+    base_url = str(data.get('baseUrl') or '').strip().rstrip('/')
+    if not base_url:
+        return jsonify({'error': 'baseUrl is required'}), 400
+    provider = {
+        'id': 'unsaved-provider',
+        'name': data.get('name') or 'Provider',
+        'baseUrl': base_url,
+        'apiKey': data.get('apiKey') or '',
+        'apiType': _norm_api_type(data.get('apiType')),
+        'models': data.get('models') if isinstance(data.get('models'), list) else [],
+        'embeddingModels': data.get('embeddingModels') if isinstance(data.get('embeddingModels'), list) else [],
+        'rerankModels': data.get('rerankModels') if isinstance(data.get('rerankModels'), list) else [],
+    }
+    provider['models'] = [str(item).strip() for item in provider['models'] if isinstance(item, str) and item.strip()][:100]
+    provider['embeddingModels'] = [str(item).strip() for item in provider['embeddingModels'] if isinstance(item, str) and item.strip()][:50]
+    provider['rerankModels'] = [str(item).strip() for item in provider['rerankModels'] if isinstance(item, str) and item.strip()][:50]
+    try:
+        from local_knowledge.provider_clients import ProviderClientError, detect_provider_capabilities
+        result = detect_provider_capabilities(provider, provider['models'], provider['embeddingModels'], provider['rerankModels'])
+    except ProviderClientError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(result)
+
+
 @app.route('/api/providers', methods=['POST'])
 def add_provider():
     """Add a new provider."""
@@ -3136,6 +3278,8 @@ def add_provider():
         "isDefault": bool(data.get('isDefault', False)),
         "models": data.get('models', []),
         "selectedModel": data.get('selectedModel', ''),
+        "embeddingModels": data.get('embeddingModels', data.get('embedding_models', [])),
+        "rerankModels": data.get('rerankModels', data.get('rerank_models', [])),
     }
 
     # Update if exists, otherwise append
@@ -4252,6 +4396,7 @@ def chat_proxy():
     retry_codes = (429, 503)
 
     def do_request(stream_req=False):
+        _knowledge_count_online('chat', model)
         return http_requests.post(url, json=payload, headers=headers, stream=stream_req, timeout=120)
 
     try:
@@ -4795,6 +4940,7 @@ def _llm_chat_full(base_url, api_key, model, system_prompt, user_prompt, max_tok
             payload = _build_anthropic_payload(
                 model, messages, stream=False, max_tokens=max_tokens, temperature=temperature,
             )
+            _knowledge_count_online('auxiliary', model)
             resp = http_requests.post(url, json=payload, headers=headers, timeout=180)
             resp.raise_for_status()
             data = _anthropic_json_to_openai(resp.json(), model)
@@ -4814,6 +4960,7 @@ def _llm_chat_full(base_url, api_key, model, system_prompt, user_prompt, max_tok
                 if conflict:
                     raise ValueError(f"request_options cannot override reserved fields: {sorted(conflict)}")
                 payload.update(request_options)
+            _knowledge_count_online('auxiliary', model)
             resp = http_requests.post(url, json=payload, headers=headers, timeout=180)
             resp.raise_for_status()
             data = resp.json()
@@ -6195,6 +6342,23 @@ def _resolve_role_target(role: str, settings: dict, providers: list) -> dict:
     return out
 
 
+def _local_intent_response(message, recent, local, settings, providers, trace):
+    intent = local['intent']
+    role = 'code_simple' if intent == '代码编写' else _INTENT_TO_ROLE.get(intent, 'chat_basic')
+    target = _resolve_role_target(role, settings, providers)
+    if target.get('kind') == 'unbound' and role != 'chat_basic':
+        fallback = _resolve_role_target('chat_basic', settings, providers)
+        if fallback.get('kind') == 'role':
+            target = {**fallback, 'fallback_from': role}
+            role = 'chat_basic'
+    trace.append({'step': '本地意图基线', 'detail': f'{intent} · 样例词项覆盖 {local["coverage"]:.0%}',
+                  'status': 'warn' if intent == '未知' else 'done'})
+    return jsonify({'intent': intent, 'complexity': '简单' if intent == '代码编写' else None,
+                    'keywords': list(dict.fromkeys(_knowledge_tokens(message)))[:5],
+                    'reason': local['reason'], 'same_topic': bool(recent),
+                    'role': role, 'target': target, 'trace': trace, 'raw': '', 'baseline': local})
+
+
 @app.route('/api/auto-route', methods=['POST'])
 def api_auto_route():
     """根据用户消息和当前对话上下文做意图分析 + 角色路由判断。
@@ -6233,6 +6397,16 @@ def api_auto_route():
     if not isinstance(providers, list):
         providers = []
 
+    # Chat messages may include long documents; the interactive search field's
+    # 2000-character limit must not prevent the existing model route.
+    local_intent = (_get_knowledge_store().classify(message) if len(message) <= 2000
+                    else _unknown_local_intent())
+    recent_for_local = data.get('recent_messages')
+    if not isinstance(recent_for_local, list):
+        recent_for_local = []
+    if local_intent['intent'] != '未知' and local_intent['coverage'] >= 0.65:
+        return _local_intent_response(message, recent_for_local, local_intent, settings, providers, trace)
+
     # intent 模型凭据：优先 body，缺省时用 settings.model_roles.intent → 在 providers 中查
     base_url = (data.get('baseUrl') or '').rstrip('/')
     api_key = data.get('apiKey') or ''
@@ -6246,9 +6420,9 @@ def api_auto_route():
             model = intent_bind.get('model') or ''
 
     if not (base_url and model):
-        return jsonify({"error": "intent model not configured (settings.model_roles.intent)"}), 400
+        return _local_intent_response(message, recent_for_local, local_intent, settings, providers, trace)
     if not api_key and not _is_local_baseurl(base_url):
-        return jsonify({"error": "intent model apiKey required"}), 400
+        return _local_intent_response(message, recent_for_local, local_intent, settings, providers, trace)
 
     try:
         _host = re.sub(r'^https?://', '', base_url).split('/')[0]
@@ -6287,7 +6461,7 @@ def api_auto_route():
     except Exception as e:
         logger.error(f"auto-route LLM error: {e}")
         _trace("调用意图模型", f"失败：{e}", status="error")
-        return jsonify({"error": f"intent LLM error: {e}", "trace": trace}), 502
+        return _local_intent_response(message, recent_for_local, local_intent, settings, providers, trace)
 
     # 解析 JSON：宽松一点，去掉 ``` 包裹 / 多余文本
     parsed = None
@@ -9521,6 +9695,45 @@ def alias_status_stream():
 # ============================================================
 # Main Entry Point
 # ============================================================
+from pathlib import Path as _KnowledgePath
+from local_knowledge.runtime import Runtime as _KnowledgeRuntime
+from local_knowledge.api import create_blueprint as _knowledge_blueprint
+
+_knowledge_runtime = _KnowledgeRuntime(
+    _KnowledgePath(DATA_DIR) / 'local-knowledge',
+    lambda: _load_settings()['local_knowledge'],
+    lambda: load_state()['conversations'],
+    lambda: load_state().get('providers', []),
+    saved_knowledge=_saved_knowledge_for_lookup,
+)
+app.register_blueprint(_knowledge_blueprint(
+    runtime=lambda: _knowledge_runtime,
+    get_providers=lambda: load_state().get('providers', []),
+))
+
+
+def _knowledge_sync_after_save(conversations):
+    try:
+        _knowledge_runtime.sync_after_save(conversations)
+    except Exception as exc:
+        logger.warning('Local knowledge synchronization deferred (%s)', type(exc).__name__)
+
+
+def _knowledge_count_online(kind, model):
+    if not has_request_context():
+        return
+    request_id = request.headers.get('X-Request-ID')
+    if not request_id or not _load_settings()['local_knowledge']['enabled']:
+        return
+    try:
+        store = _knowledge_runtime.store
+        if store.request(request_id) is None:
+            store.update_request(request_id, stage='online')
+        store.record_online_call(request_id, uuid.uuid4().hex, kind, model)
+    except Exception as exc:
+        logger.warning('Local knowledge request accounting unavailable (%s)', type(exc).__name__)
+
+
 if __name__ == '__main__':
     PORT = int(os.environ.get('PORT', 8765))
     HOST = os.environ.get('HOST', '0.0.0.0')

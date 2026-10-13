@@ -9,14 +9,16 @@ import type {
   ModelRolesSettings, ModelRoleId, ModelEndpointsSettings, ModelEndpointId,
   ModelRoleBinding, ModelEndpointBinding,
 } from '../types';
+import KnowledgeSettings, {localKnowledgeDefaults} from './KnowledgeSettings';
 
 interface Props {
+  initialTab?: Tab;
   visible: boolean;
   onClose: () => void;
   onSaved?: (s: AppSettings) => void;
 }
 
-type Tab = 'model' | 'search' | 'roles';
+type Tab = 'model' | 'search' | 'roles' | 'knowledge';
 
 const ROLE_META: { id: ModelRoleId; label: string; desc: string }[] = [
   { id: 'intent',         label: '基础意图分析模型', desc: '解析用户输入的意图（参考 yitu.txt），是「自动选模型」流程的入口。建议用快、便宜、稳定的模型。' },
@@ -62,13 +64,14 @@ const PARAM_DOCS: Record<string, string> = {
   system_prompt: '全局 system 提示，每次发送会自动注入到 messages 头部（前端如果已经有 system 消息则不会覆盖）。',
 };
 
-export default function SettingsModal({ visible, onClose, onSaved }: Props) {
+export default function SettingsModal({ visible, onClose, onSaved, initialTab = 'model' }: Props) {
   const [tab, setTab] = useState<Tab>('model');
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [providers, setProviders] = useState<WebSearchProviderInfo[]>([]);
   const [llmProviders, setLlmProviders] = useState<APIProvider[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [knowledgeImporting, setKnowledgeImporting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string; sample?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,14 +97,14 @@ export default function SettingsModal({ visible, onClose, onSaved }: Props) {
 
   useEffect(() => {
     if (visible) {
-      setTab('model');
+      setTab(initialTab);
       setTestResult(null);
       void refresh();
     }
-  }, [visible, refresh]);
+  }, [visible, refresh, initialTab]);
 
   const handleSave = useCallback(async () => {
-    if (!settings) return;
+    if (!settings || knowledgeImporting || saving) return;
     setSaving(true);
     setError(null);
     try {
@@ -119,7 +122,7 @@ export default function SettingsModal({ visible, onClose, onSaved }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [settings, onSaved]);
+  }, [settings, onSaved, knowledgeImporting, saving]);
 
   const handleResetSection = useCallback(async (section: 'model_params' | 'web_search' | 'model_roles' | 'model_endpoints') => {
     const labelMap: Record<string, string> = {
@@ -201,6 +204,7 @@ export default function SettingsModal({ visible, onClose, onSaved }: Props) {
             { id: 'model', label: '模型参数', icon: Sliders },
             { id: 'roles', label: '默认模型', icon: Cpu },
             { id: 'search', label: 'Web 搜索', icon: Globe2 },
+            { id: 'knowledge', label: '本地知识', icon: Cpu },
           ] as const).map(t => {
             const I = t.icon;
             return (
@@ -231,6 +235,8 @@ export default function SettingsModal({ visible, onClose, onSaved }: Props) {
               onChange={(p) => setSettings({ ...settings, model_params: p })}
               onReset={() => handleResetSection('model_params')}
             />
+          ) : tab === 'knowledge' ? (
+            <KnowledgeSettings value={settings.local_knowledge||localKnowledgeDefaults()} onChange={value=>setSettings(current=>current?{...current,local_knowledge:value}:current)} onImportingChange={setKnowledgeImporting} disabled={saving}/>
           ) : tab === 'roles' ? (
             <ModelRolesTab
               roles={settings.model_roles}
@@ -258,7 +264,8 @@ export default function SettingsModal({ visible, onClose, onSaved }: Props) {
           <button onClick={onClose} className="px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-sm">取消</button>
           <button
             onClick={handleSave}
-            disabled={!settings || saving}
+            disabled={!settings || saving || knowledgeImporting}
+            title={knowledgeImporting?'配置导入中，请稍候':undefined}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 disabled:bg-gray-700 text-white text-sm"
           >
             {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
