@@ -52,10 +52,10 @@ def semantic_rank(store, question, entries, models, budget):
         batch = missing[start:start + 8]
         embeddings = models.embed([texts[entry['id']] for entry in batch], budget)
         with store.connection() as db:
-            for entry, vector in zip(batch, embeddings):
-                vectors[entry['id']] = vector
+            for entry, document_vector in zip(batch, embeddings):
+                vectors[entry['id']] = document_vector
                 db.execute('INSERT OR REPLACE INTO semantic_vectors VALUES(?,?,?,?)',
-                           (entry['id'], fingerprint, hash_text(texts[entry['id']]), json.dumps(vector)))
+                           (entry['id'], fingerprint, hash_text(texts[entry['id']]), json.dumps(document_vector)))
     budget.check()
     ordered = sorted(entries, key=lambda entry: -cosine(vector, vectors[entry['id']]))[:20]
     candidates = [Candidate(Chunk(entry['id'], text=f'问题：{entry["question"]}\n回答：{entry["answer"][:1500]}')) for entry in ordered]

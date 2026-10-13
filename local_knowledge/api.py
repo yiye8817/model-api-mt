@@ -12,7 +12,7 @@ from .contracts import QueryResult, UploadItem, Source, Chunk, Position
 from .model_clients import Budget, Cancelled, LocalTimeout, ModelUnavailable
 from .store import StoreUnavailable
 from .parsers import ParseError
-from .ingest import check_file_freshness
+from .ingest import check_file_freshness, indexing_budget
 from .chat_sync import turn_hash
 from .text import keyword_tokens
 from .provider_clients import Budget as ProviderBudget, ProviderModelClient, provider_catalog
@@ -169,7 +169,8 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
         else:
             job=s.store.create_job('reindex',{'source_id':source_id,'revision':source.revision})
             def run(job_id):
-                s.retriever.index_revision(source_id,source.revision,Budget(120,imp.jobs.event(job_id)))
+                chunks=s.store.revision_chunks(source_id,source.revision)
+                s.retriever.index_revision(source_id,source.revision,indexing_budget(len(chunks),imp.jobs.event(job_id)))
                 s.store.update_job(job_id,status='done',phase='done')
             imp.jobs.submit(job,run)
         return jsonify(job_id=job),202
@@ -231,7 +232,8 @@ def create_blueprint(service=None,imports=None,evaluations=None,sync=None,runtim
         if revision is None: raise ValueError('revision is required')
         if not check_file_freshness(source):
             components()[0].store.invalidate_source(source_id,status='stale');return jsonify(error='source_changed'),409
-        if source.revision!=revision or source.status in ('stale','pending'): return jsonify(error='source_changed'),409
+        if source.revision!=revision or source.status=='stale': return jsonify(error='source_changed'),409
+        if source.status=='pending': return jsonify(error='index_pending'),409
         units=source.metadata.get('units') or [{'text':c.text,'position':asdict(c.position)} for c in components()[0].store.revision_chunks(source_id,revision)]
         separator='' if units and all(x['position']['kind']=='lines' for x in units) else '\n'
         return jsonify(source_id=source_id,revision=revision,text=separator.join(x['text'] for x in units),units=units)

@@ -259,8 +259,13 @@ class ModelClients:
         return [replace(c,rank=i+1) for i,c in enumerate(ranked)]
 
     def json_chat(self, messages, schema, budget):
+        started=time.monotonic()
         data = self._call('qa','/v1/chat/completions', {'model':self.config['qa_endpoint']['model'], 'messages':list(messages), 'stream':False,
-            'temperature':0, 'max_tokens':self.config['qa_endpoint']['max_output_tokens'], 'response_format':{'type':'json_object','schema':schema}}, budget)
+            'temperature':0, 'max_tokens':self.config['qa_endpoint']['max_output_tokens'],
+            'chat_template_kwargs':{'enable_thinking':False}, 'response_format':{'type':'json_object','schema':schema}}, budget)
+        from .diagnostics import log_event
+        log_event('knowledge.model_call',role='qa',duration_ms=round((time.monotonic()-started)*1000,2),
+            usage=data.get('usage',{}),timings=data.get('timings',{}))
         try:
             choice = data['choices'][0]
             if choice.get('finish_reason') not in ('stop', None):

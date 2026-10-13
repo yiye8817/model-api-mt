@@ -3127,6 +3127,12 @@ def _get_knowledge_store():
     return _knowledge_store
 
 
+def _saved_knowledge_for_lookup():
+    store=_get_knowledge_store()
+    store.sync_conversations(load_state().get('conversations',[]))
+    return store
+
+
 def _content_library_semantic(request_id):
     from local_knowledge.model_clients import Budget, ModelUnavailable
     service = _knowledge_runtime.components()[0]
@@ -3153,8 +3159,19 @@ def _content_library_semantic(request_id):
     return service.models, budget, progress, source_valid
 
 
+def _content_library_document_lookup(data, budget):
+    from local_knowledge.retrieval import effective_scope
+    service = _knowledge_runtime.components()[0]
+    config = service.settings()
+    if not config['enabled']:
+        return False
+    scope = effective_scope(service.store, data.get('source_ids', []), config['selected_source_ids'])
+    return bool(scope and service.probe_lookup(data, scope, budget))
+
+
 register_knowledge_routes(app, _get_knowledge_store, lambda: load_state().get('conversations', []),
-                          prefix='/api/content-library', get_semantic=_content_library_semantic)
+                          prefix='/api/content-library', get_semantic=_content_library_semantic,
+                          get_document_lookup=_content_library_document_lookup)
 
 
 @app.route('/api/state', methods=['GET'])
@@ -9687,6 +9704,7 @@ _knowledge_runtime = _KnowledgeRuntime(
     lambda: _load_settings()['local_knowledge'],
     lambda: load_state()['conversations'],
     lambda: load_state().get('providers', []),
+    saved_knowledge=_saved_knowledge_for_lookup,
 )
 app.register_blueprint(_knowledge_blueprint(
     runtime=lambda: _knowledge_runtime,

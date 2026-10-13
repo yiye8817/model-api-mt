@@ -12,18 +12,21 @@ def effective_scope(store,requested,selected):
     return sorted(set(enabled)&allowed)
 
 
-def keyword_search(store,question,source_ids,limit=20):
+def keyword_search(store,question,source_ids,limit=20,require_all=False,document_only=False):
     if not source_ids: return []
     tokens=keyword_tokens(question)[:512]
     if not tokens: return []
-    query=' OR '.join('"'+t.replace('"','""')+'"' for t in tokens)
+    query=(' AND ' if require_all else ' OR ').join('"'+t.replace('"','""')+'"' for t in tokens)
     placeholders=','.join('?' for _ in source_ids)
+    document_filter="AND json_extract(s.body,'$.kind')='document' AND json_extract(s.body,'$.nature')='document'" if document_only else ''
     sql=f"""SELECT chunks_fts.chunk_id,bm25(chunks_fts) AS score
       FROM chunks_fts JOIN chunks c ON c.id=chunks_fts.chunk_id JOIN sources s ON s.id=c.source_id
       WHERE chunks_fts MATCH ? AND s.enabled=1 AND s.status='indexed'
       AND c.status='indexed' AND c.revision=s.revision AND s.id IN ({placeholders})
-      ORDER BY score,chunks_fts.chunk_id LIMIT ?"""
-    return [r['chunk_id'] for r in store.connection.execute(sql,[query,*source_ids,limit])]
+      {document_filter}
+      ORDER BY score,chunks_fts.chunk_id"""
+    if limit is not None:sql+=' LIMIT ?'
+    return [r['chunk_id'] for r in store.connection.execute(sql,[query,*source_ids,*([limit] if limit is not None else [])])]
 
 
 def keyword_phrase_search(store, question, source_ids, limit=20):
@@ -65,7 +68,7 @@ class Retriever:
         if not source or source.revision!=revision or source.status not in ('pending','indexed'): raise ModelUnavailable('Source revision changed before publication')
         if source.status=='pending' and not self.store.activate_revision(source_id,revision): raise ModelUnavailable('Index publication failed')
 
-    def retrieve(self,question,source_ids,budget,allow_degraded=False):
+    def retrieve(self,question,source_ids,budget,allow_degraded=False,balance_sources=False):
         if not source_ids: return []
         config=getattr(self.models,'config',{})
         limit=config.get('vector_top_k',20)
@@ -90,6 +93,15 @@ class Retriever:
             if not allow_degraded:
                 raise
             ranked=candidates
+        if balance_sources:
+            # Keep relevant documents visible when many saved answers rank
+            # ahead of them. Both pools still use the same semantic scores.
+            groups={'document':[],'history':[]}
+            for candidate in ranked:
+                source=self.store.get_source(candidate.chunk.source_id)
+                key='document' if source and source.kind=='document' else 'history'
+                if len(groups[key])<3:groups[key].append(candidate)
+            return [c for group in groups.values() for c in group]
         return ranked[:config.get('rerank_top_k',5)]
 
     def evidence_units(self,candidates,token_budget,budget):

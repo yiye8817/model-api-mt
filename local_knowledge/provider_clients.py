@@ -90,7 +90,8 @@ class ProviderModelClient:
 
     def _post(self, payload: dict[str, Any], budget: Budget, url: str | None = None) -> dict[str, Any]:
         budget.check()
-        remaining = max(0.05, budget.remaining())
+        # A larger document budget must not lengthen one stalled HTTP call.
+        remaining = max(0.05, min(120, budget.remaining()))
         try:
             response = requests.post(url or _url(self.provider, self.path), headers=_headers(self.provider),
                                      json=payload, timeout=remaining, allow_redirects=False)
@@ -127,6 +128,15 @@ class ProviderModelClient:
         if not texts:
             return []
         dashscope = _is_dashscope_provider(self.provider)
+        # DashScope v3/v4 accept at most ten texts per request. Keep one
+        # budget and dimension check across batches, preserving input order.
+        batch_size = 10 if dashscope else len(texts)
+        vectors = []
+        for start in range(0, len(texts), batch_size):
+            vectors.extend(self._embed_batch(texts[start:start + batch_size], budget, dashscope))
+        return vectors
+
+    def _embed_batch(self, texts: list[str], budget: Budget, dashscope: bool) -> list[list[float]]:
         payload = {'model': self.model, 'input': {'texts': list(texts)}} if dashscope else {'model': self.model, 'input': list(texts)}
         response = self._post(payload, budget, _dashscope_url(self.provider, self.role, self.model) if dashscope else None)
         data = response.get('data')

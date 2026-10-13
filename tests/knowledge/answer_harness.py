@@ -23,6 +23,8 @@ class ScriptedModels:
             result={'answerable':True,'answer':'A 型号保修三年 [1]','matched_constraints':payload['constraint_ids'],'unresolved_constraints':[],'conflicts':[],
                 'claims':[{'text':'A 型号保修三年','citations':[{'chunk_id':chunk['id'],'quote':chunk['text']}]}]}
         elif task=='verify': result={'supported':True,'answer_covered':True,'constraints_covered':True,'unresolved_constraints':[],'conflicts':[],'uncovered_claims':[]}
+        elif task=='select_excerpts': result={'qa':True,'hit':False,'ids':[]}
+        elif task=='verify_excerpts': result={'supported':True,'complete':True}
         else: raise AssertionError(task)
         override=self.overrides.get(task)
         if callable(override): result=override(result,payload)

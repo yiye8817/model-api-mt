@@ -3,9 +3,10 @@ from functools import wraps
 import time
 
 from flask import jsonify, request
+from local_knowledge.diagnostics import log_event
 
 
-def register_knowledge_routes(app, get_store, get_conversations, prefix='/api/knowledge', get_semantic=None):
+def register_knowledge_routes(app, get_store, get_conversations, prefix='/api/knowledge', get_semantic=None, get_document_lookup=None):
     def safe(fn):
         @wraps(fn)
         def wrapped(*args, **kwargs):
@@ -51,6 +52,7 @@ def register_knowledge_routes(app, get_store, get_conversations, prefix='/api/kn
         from .datasets import text
         from .reuse import miss
         from local_knowledge.model_clients import Cancelled, LocalTimeout, ModelUnavailable
+        from local_knowledge.matching import EvidenceError
         data = body()
         request_id = text(data.get('request_id'), 'request_id', True, maximum=200)
         question = text(data.get('question'), 'question', True, maximum=20000)
@@ -61,15 +63,22 @@ def register_knowledge_routes(app, get_store, get_conversations, prefix='/api/kn
             raise ValueError('context 必须是消息数组')
         if not isinstance(sources, list) or any(not isinstance(s, str) for s in sources):
             raise ValueError('source_ids 必须是字符串数组')
+        def respond(result, duration_ms=0):
+            log_event('knowledge.saved_result',request_id=request_id,question=question,
+                decision=result['decision'],reason=result['reason'],answer_origin=result.get('answer_origin'),
+                duration_ms=duration_ms,saved_entry=result.get('saved_entry'),quote=result.get('answer') or '')
+            return jsonify({'request_id':request_id,**result,'duration_ms':duration_ms})
         if sources or data.get('bypass_saved_reuse'):
-            return jsonify({'request_id': request_id, **miss('source_scope_or_regenerate')})
+            return respond(miss('source_scope_or_regenerate'))
         started = time.monotonic()
         models, budget, progress, source_valid = None, None, lambda stage: None, None
         try:
             if get_semantic:
                 models, budget, progress, source_valid = get_semantic(request_id)
             progress('retrieval')
-            result = synced().reuse(question, constraints, context=context, models=models, budget=budget, source_valid=source_valid)
+            result = synced().reuse(question, constraints, context=context, models=models, budget=budget,
+                                    source_valid=source_valid, request_id=request_id,
+                                    document_lookup=(lambda:get_document_lookup(data,budget)) if get_document_lookup else None)
             progress('hit' if result['decision'] == 'hit' else 'prepare')
         except Cancelled:
             result = {**miss('cancelled'), 'decision': 'cancelled'}
@@ -77,7 +86,9 @@ def register_knowledge_routes(app, get_store, get_conversations, prefix='/api/kn
             result = miss('local_timeout')
         except ModelUnavailable:
             result = miss('local_unavailable')
-        return jsonify({'request_id': request_id, **result, 'duration_ms': round((time.monotonic() - started) * 1000, 1)})
+        except EvidenceError as exc:
+            result = miss(exc.reason)
+        return respond(result,round((time.monotonic()-started)*1000,1))
 
     @app.post(prefix + '/import')
     @safe

@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 
 def wait_job(manager,job_id):
     deadline=time.monotonic()+5
@@ -61,4 +63,48 @@ def test_missing_selected_file_does_not_scan_its_parent(tmp_path):
         job=wait_job(manager,manager.enqueue({'kind':'paths','roots':[str(root/'missing.txt')]}))
         assert job['failed']==1 and job['succeeded']==0
         assert store.list_sources()==[]
+    finally:manager.close()
+
+
+@pytest.mark.parametrize('recover',[False,True])
+def test_large_document_index_can_run_beyond_small_document_timeout(tmp_path,recover):
+    from local_knowledge.ingest import ImportManager
+    from local_knowledge.store import Store
+    root=tmp_path/'documents';root.mkdir()
+    (root/'large.txt').write_text('资料样本\n\n'*500)
+    store=Store(tmp_path/'data')
+    def index(source_id,revision,budget):
+        # Advance elapsed indexing time without a wall-clock sleep.
+        budget.deadline-=150
+        budget.check()
+        store.activate_revision(source_id,revision)
+    manager=ImportManager(store,None if recover else index)
+    try:
+        job_id=manager.enqueue({'kind':'paths','roots':[str(root)]})
+        if recover:
+            assert wait_job(manager,job_id)['status']=='waiting_index'
+            manager.index_revision=index
+            manager.recover()
+        job=wait_job(manager,job_id)
+        assert job['succeeded']==1 and job['failed']==0
+        assert store.list_sources()[0].status=='indexed'
+    finally:manager.close()
+
+
+def test_small_document_index_still_has_a_timeout(tmp_path):
+    from local_knowledge.ingest import ImportManager
+    from local_knowledge.store import Store
+    root=tmp_path/'documents';root.mkdir()
+    (root/'small.txt').write_text('资料样本')
+    store=Store(tmp_path/'data')
+    def index(source_id,revision,budget):
+        budget.deadline-=150
+        budget.check()
+        store.activate_revision(source_id,revision)
+    manager=ImportManager(store,index)
+    try:
+        job=wait_job(manager,manager.enqueue({'kind':'paths','roots':[str(root)]}))
+        assert job['failed']==1 and job['succeeded']==0
+        assert store.list_sources()[0].status=='pending'
+        assert store.visible_chunks()==[]
     finally:manager.close()

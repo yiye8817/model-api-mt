@@ -7,7 +7,10 @@ export default function KnowledgeSourceViewer({sourceId,revision,position}:{sour
   const [content,setContent]=useState<Content|null>(null),[error,setError]=useState('');const mark=useRef<HTMLElement|null>(null);
   useEffect(()=>{const controller=new AbortController();setContent(null);setError('');
     fetch(`/api/knowledge/sources/${encodeURIComponent(sourceId)}/content?revision=${revision}`,{signal:controller.signal}).then(async r=>{
-      if(!r.ok)throw new Error(r.status===409?'来源已变更，请更新索引并重新提问':r.status===404?'来源已删除或不可用':'无法读取来源');return r.json();
+      if(!r.ok){
+        const detail=await r.json().catch(()=>null);
+        throw new Error(r.status===409?(detail?.error==='index_pending'?'文档尚未完成索引，请检查索引任务中的失败原因后重试':'来源已变更，请更新索引并重新提问'):r.status===404?'来源已删除或不可用':'无法读取来源');
+      }return r.json();
     }).then(data=>{if(!controller.signal.aborted)setContent(data);}).catch(e=>{if(!controller.signal.aborted)setError(e.message);});return()=>controller.abort();
   },[sourceId,revision]);
   useEffect(()=>{mark.current?.scrollIntoView({block:'center'});},[content]);

@@ -54,6 +54,18 @@ def test_json_chat_rejects_truncated_and_empty_output(content, finish):
             ModelClients(s.config).json_chat([{'role': 'user', 'content': 'q'}], {'type': 'object'}, budget())
 
 
+def test_structured_qa_disables_template_thinking_to_keep_the_json_budget():
+    from local_knowledge.model_clients import ModelClients
+    def respond(payload):
+        if payload.get('chat_template_kwargs',{}).get('enable_thinking') is False:
+            return {'choices':[{'message':{'content':'{"answerable":true}'},'finish_reason':'stop'}]}
+        return {'choices':[{'message':{'content':''},'finish_reason':'length'}]}
+    with ModelServer({'/v1/chat/completions':respond}) as s:
+        result=ModelClients(s.config).json_chat([{'role':'user','content':'检查原文是否可答'}],
+            {'type':'object','properties':{'answerable':{'type':'boolean'}},'required':['answerable']},budget())
+        assert result=={'answerable':True}
+
+
 def test_redirect_to_public_host_not_followed():
     from local_knowledge.model_clients import ModelClients, ModelUnavailable
     with ModelServer({'/v1/embeddings': (302, {'location': 'https://public.example'})}) as s:

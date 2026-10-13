@@ -11,6 +11,10 @@ from uuid import uuid4
 from .datasets import convert, digest, text, url
 from .matching import APP_INTENTS, coverage, fts_query, tokens, unknown_intent
 from .reuse import normalize_question, requires_fresh_context, semantic_rank, applicable, hit, miss
+from local_knowledge.diagnostics import log_event
+from local_knowledge.intents import parse_knowledge_question,covers,topic_key
+from local_knowledge.synthesis import answer_covers
+from local_knowledge.lookup import excerpt_constraints_supported
 
 FACT_STATES = ('correct', 'unverified', 'uncertain', 'incorrect')
 
@@ -250,7 +254,39 @@ class KnowledgeStore:
                 "SELECT e.*,a.data annotation,a.updated_at annotated_at FROM entries e "
                 "LEFT JOIN annotations a ON e.id=a.entry_id WHERE e.kind='qa' ORDER BY e.updated_at DESC,e.id")]
 
-    def reuse(self, question, constraints='', context=None, models=None, budget=None, source_valid=None):
+    def _reusable(self,entry,constraints,source_valid=None):
+        return (bool(entry['question'] and entry['answer']) and entry['fact_status'] in ('correct','unverified')
+            and not entry.get('provenance_invalid') and not entry.get('derived_local')
+            and (entry.get('reusable',entry['origin']!='history') or entry['fact_status']=='correct')
+            and entry.get('system_constraints','').strip()==constraints
+            and (not entry.get('reused_entry_id') or entry['fact_status']=='correct')
+            and (source_valid is None or source_valid(entry)))
+
+    def _generation_scope_matches(self,entry,context):
+        original=entry.get('generation_context',[])
+        restricted=any(m.get('role')=='user' and re.search(r'只(?:讨论|考虑|谈)|限定|假设|\bonly\b|this scenario',m.get('content',''),re.I) for m in original)
+        return not restricted or original==(context or [])
+
+    def saved_candidates(self,question,constraints='',context=None,limit=5,semantic=False):
+        query=parse_knowledge_question(question)
+        if (not query and not semantic) or requires_fresh_context(question,context):return []
+        with self.connection() as db:
+            entries=[self._materialize(row) for row in db.execute("SELECT e.*,a.data annotation,a.updated_at annotated_at FROM entries e "
+                "LEFT JOIN annotations a ON e.id=a.entry_id WHERE e.kind='qa' AND e.origin='history' ORDER BY e.updated_at,e.id")]
+        result=[]
+        for entry in entries:
+            if not self._reusable(entry,constraints):continue
+            if not self._generation_scope_matches(entry,context):continue
+            if semantic:
+                result.append({**entry,'match_method':'semantic_candidate'})
+            else:
+                saved=parse_knowledge_question(entry['question'])
+                if saved and topic_key(saved.topic)==topic_key(query.topic) and answer_covers(entry['answer'],query):
+                    result.append({**entry,'match_method':'topic_evidence'})
+        result.sort(key=lambda e:(FACT_STATES.index(e['fact_status']),len(e.get('generation_context',[])),e['id']))
+        return result[:limit] if limit is not None else result
+
+    def reuse(self, question, constraints='', context=None, models=None, budget=None, source_valid=None, request_id='', document_lookup=None):
         question = text(question, 'question', True, maximum=20000)
         constraints = text(constraints, 'system_constraints')
         context = context or []
@@ -258,30 +294,48 @@ class KnowledgeStore:
             return miss('fresh_context_required')
         # Preserve explicit ongoing user instructions instead of treating a
         # matching topic as permission to ignore the current conversation.
-        if any(message.get('role') == 'user' and re.search(r'以后|接下来.*都|用.{0,15}(?:英语|英文|格式).{0,10}(?:回答|回复)', message.get('content', '')) for message in context):
+        if not excerpt_constraints_supported({'system_constraints':'','context':context}):
             return miss('context_constraints')
         def eligible(entry):
-            return (bool(entry['question'] and entry['answer']) and entry['fact_status'] in ('correct', 'unverified')
-                    and not entry.get('provenance_invalid') and not entry.get('derived_local')
-                    and (entry.get('reusable', entry['origin'] != 'history') or entry['fact_status'] == 'correct')
-                    and entry.get('system_constraints', '').strip() == constraints
-                    and (not entry.get('reused_entry_id') or entry['fact_status'] == 'correct')
-                    and (source_valid is None or source_valid(entry)))
+            return self._reusable(entry,constraints,source_valid)
         candidates = [entry for entry in self.qa_entries() if eligible(entry)]
+        def log_candidates(rows, method):
+            log_event('knowledge.saved_search', request_id=request_id, question=question,
+                method=method, eligible_count=len(candidates), candidate_count=len(rows),
+                candidates=[{'entry_id':entry['id'],'question':entry['question'],'quote':entry['answer'],
+                    'source_name':entry.get('source_name',''),'fact_status':entry['fact_status'],
+                    'score':entry.get('match_score')} for entry in rows[:5]])
         if not candidates:
+            log_candidates([], 'empty')
             return miss()
+        # A local answer may now combine both a document and saved dialogues.
+        # Probe that route even when an exact saved answer exists.
+        if document_lookup is not None and document_lookup():
+            log_candidates([], 'document_lookup_preferred')
+            return miss('document_answer_available')
         exact = [entry for entry in candidates if normalize_question(entry['question']) == normalize_question(question)]
         if exact:
             exact.sort(key=lambda entry: FACT_STATES.index(entry['fact_status']))
+            log_candidates(exact, 'normalized_question')
             # An exact saved question has already passed the user's original
             # applicability boundary. Avoid spending the local QA budget on a
             # second semantic check before returning a durable saved answer.
             return hit(exact[0], 'normalized_question')
+        query=parse_knowledge_question(question)
+        subset=[entry for entry in candidates if covers(query,parse_knowledge_question(entry['question']))
+                and self._generation_scope_matches(entry,context) and answer_covers(entry['answer'],query)]
+        if subset:
+            subset.sort(key=lambda entry:FACT_STATES.index(entry['fact_status']))
+            log_candidates(subset,'intent_subset')
+            return hit(subset[0],'intent_subset')
         if models is not None:
+            # Check a cheap indexed document definition before spending the
+            # shared local deadline on semantic matching of saved answers.
             ranked = semantic_rank(self, question, candidates, models, budget)
             # Model scores rank semantic applicability; manual factual status
             # remains a separate field and is never set by this process.
             shortlist = sorted(ranked[:5], key=lambda entry: (FACT_STATES.index(entry['fact_status']), -entry['match_score']))
+            log_candidates(shortlist, 'semantic')
             for entry in shortlist:
                 budget.check()
                 if not applicable(question, entry, context, constraints, models, budget):
@@ -293,6 +347,7 @@ class KnowledgeStore:
                 budget.check()
                 return hit(current, 'semantic')
             return miss('no_applicable_saved_answer')
+        log_candidates([], 'no_semantic_model')
         return miss()
 
     def sync_conversations(self, conversations):

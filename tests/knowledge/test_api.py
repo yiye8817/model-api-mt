@@ -60,6 +60,17 @@ def test_source_content_requires_current_revision(api):
     assert client.get('/api/knowledge/sources/manual/content').status_code==400
 
 
+def test_pending_source_content_reports_unfinished_index(api):
+    from local_knowledge.contracts import Source,Chunk
+    client,store,c,imports=api
+    store.upsert_pending(Source('pending',content_hash='new'),[Chunk('new',text='文档原文')])
+    response=client.get('/api/knowledge/sources/pending/content?revision=1')
+    assert response.status_code==409
+    assert response.json['error']=='index_pending'
+    assert store.get_source('pending').status=='pending'
+    assert client.get('/api/knowledge/sources/pending/content?revision=2').json['error']=='source_changed'
+
+
 def test_citation_view_detects_changed_original_file(api,tmp_path):
     from local_knowledge.ingest import file_source
     from local_knowledge.contracts import Chunk

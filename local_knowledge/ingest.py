@@ -78,6 +78,13 @@ def check_file_freshness(source):
     except (OSError,ValueError,ParseError): return False
 
 
+def indexing_budget(chunk_count,cancel_event):
+    # Background imports scale with document size; keep each file bounded
+    # to thirty minutes. Interactive queries retain their own short budget.
+    batches=(chunk_count+15)//16
+    return Budget(min(1800,max(120,batches*10)),cancel_event)
+
+
 def safe_relative_path(value):
     normalized=value.replace('\\','/')
     path=PurePosixPath(normalized)
@@ -226,7 +233,7 @@ class ImportManager:
                     self.store.update_job(job_id,phase='indexing',stage='embedding')
                     self.store.update_job_progress(job_id, {'stage': 'embedding', 'chunks_completed': max(0, self.snapshot(job_id).get('chunks_completed', 0)),
                                                             'current_item': display_path})
-                    self.index_revision(source.id,revision,Budget(120,event))
+                    self.index_revision(source.id,revision,indexing_budget(len(chunks),event))
                     self.store.update_job_progress(job_id, {'stage': 'committing', 'chunks_completed': chunks_total,
                                                             'batches_completed': batches_total})
                 else: waiting=True
@@ -262,7 +269,8 @@ class ImportManager:
             elif job['kind'] in ('chat_index','reindex') and self.index_revision:
                 def resume_index(job_id):
                     payload=self.store.job(job_id)['payload']
-                    self.index_revision(payload['source_id'],payload['revision'],Budget(120,self.jobs.event(job_id)))
+                    chunks=self.store.revision_chunks(payload['source_id'],payload['revision'])
+                    self.index_revision(payload['source_id'],payload['revision'],indexing_budget(len(chunks),self.jobs.event(job_id)))
                     self.store.update_job(job_id,status='done',phase='done',completed=1,succeeded=1)
                 self.jobs.submit(job['id'],resume_index)
             elif job['kind']=='evaluation':

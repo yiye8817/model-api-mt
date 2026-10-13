@@ -14,7 +14,15 @@ class CapabilityServer:
                 body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
                 parent.calls.append((self.path, self.headers.get('Authorization'), body))
                 model=body.get('model')
-                if self.path.endswith('/api/v1/services/rerank/text-rerank/text-rerank') and model=='gte-rerank-v2' and isinstance(body.get('input'),dict):
+                if self.path.endswith('/api/v1/services/embeddings/text-embedding/text-embedding') and model=='text-embedding-v4':
+                    texts=body.get('input',{}).get('texts',[])
+                    if len(texts)>10:
+                        payload={'code':'InvalidParameter','message':'batch size must not exceed 10'};status=400
+                    elif 'reject' in texts:
+                        payload={'code':'InvalidParameter','message':'invalid text'};status=400
+                    else:
+                        payload={'output':{'embeddings':[{'text_index':i,'embedding':[float(value),1.0]} for i,value in reversed(list(enumerate(texts))) ]}};status=200
+                elif self.path.endswith('/api/v1/services/rerank/text-rerank/text-rerank') and model=='gte-rerank-v2' and isinstance(body.get('input'),dict):
                     payload={'output':{'results':[{'index':0,'relevance_score':0.9},{'index':1,'relevance_score':0.1}]}};status=200
                 elif self.path.endswith('/embeddings') and model=='embed-good':
                     payload={'data':[{'index':0,'embedding':[1.0,0.0]}]};status=200
@@ -90,3 +98,38 @@ def test_dashscope_gte_rerank_uses_service_endpoint_and_nested_protocol(capabili
     path,_,body=capability_server.calls[-1]
     assert path.endswith('/api/v1/services/rerank/text-rerank/text-rerank')
     assert body['input']=={'query':'query','documents':['doc-a','doc-b']}
+
+
+def test_dashscope_embedding_large_batch_preserves_all_vectors_in_input_order(capability_server):
+    from local_knowledge.provider_clients import ProviderModelClient
+    from local_knowledge.model_clients import Budget
+    client=ProviderModelClient({'baseUrl':capability_server.url+'/compatible-mode/v1','provider_kind':'dashscope'},'embedding','text-embedding-v4')
+    vectors=client.embed([str(i) for i in range(23)],Budget(10,threading.Event()))
+    assert vectors==[[float(i),1.0] for i in range(23)]
+    assert client.dimension==2
+
+
+def test_dashscope_embedding_rejects_partial_result_when_a_later_batch_fails(capability_server):
+    from local_knowledge.provider_clients import ProviderModelClient,ProviderClientError
+    from local_knowledge.model_clients import Budget
+    client=ProviderModelClient({'baseUrl':capability_server.url+'/compatible-mode/v1','provider_kind':'dashscope'},'embedding','text-embedding-v4')
+    with pytest.raises(ProviderClientError,match='HTTP 400'):
+        client.embed([str(i) for i in range(10)]+['reject'],Budget(10,threading.Event()))
+    assert client.dimension==2
+
+
+@pytest.mark.parametrize('seconds,maximum',[(20,20),(520,120)])
+def test_provider_call_timeout_is_bounded_within_total_index_budget(monkeypatch,seconds,maximum):
+    import requests
+    from local_knowledge.provider_clients import ProviderModelClient
+    from local_knowledge.model_clients import Budget
+    timeouts=[]
+    def post(url,**kwargs):
+        timeouts.append(kwargs['timeout'])
+        response=requests.Response();response.status_code=200
+        response._content=b'{"data":[{"index":0,"embedding":[1.0,0.0]}]}'
+        return response
+    monkeypatch.setattr(requests,'post',post)
+    client=ProviderModelClient({'baseUrl':'https://provider.example/v1'},'embedding','embed')
+    assert client.embed(['text'],Budget(seconds,threading.Event()))==[[1.0,0.0]]
+    assert 0<timeouts[0]<=maximum

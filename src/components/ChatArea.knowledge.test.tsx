@@ -55,6 +55,57 @@ it('real App sends only one local query before automatic model selection',async(
   expect(document.querySelectorAll('[data-message-role="assistant"]')).toHaveLength(1);
 });
 
+it.each(['什么是多级页表','多级页表','什么是多极页表'])('real App keeps a document excerpt for %s local before online routing',async(question)=>{
+  const backend=installBackend();const original=backend.fetcher.getMockImplementation()!;
+  backend.settings.local_knowledge!.evaluation_profile_id='';
+  backend.fetcher.mockImplementation(async(input,init)=>{
+    if(String(input)==='/api/content-library/reuse'){
+      const body=JSON.parse(String(init?.body));backend.calls.push({url:String(input),body});
+      return Response.json({request_id:body.request_id,decision:'miss',reason:'no_saved_answer',answer:null,citations:[],trace:[],local_model:'',duration_ms:1,answer_origin:null});
+    }
+    if(String(input)==='/api/knowledge/query'){
+      const body=JSON.parse(String(init?.body));backend.calls.push({url:String(input),body});
+      return Response.json({request_id:body.request_id,decision:'hit',reason:'',answer:'多级页表按层级组织页表，减少未使用地址空间的内存占用。',
+        citations:[{source_id:'manual',source_kind:'document',title:'part3.html',chunk_id:'chunk',revision:1,locator:{kind:'file',path:'/fixture/part3.html'},position:{kind:'lines',start_line:30,end_line:34},quote:'解决方案是使用多级页表。'}],
+        trace:[{stage:'extractive_retrieval',status:'done',method:'document_definition'}],local_model:'',duration_ms:1,answer_origin:'extractive_document'});
+    }
+    return original(input,init);
+  });
+  localStorage.setItem('autoRouteEnabled','1');render(<App/>);await screen.findByText('本地优先');
+  fireEvent.change(screen.getByLabelText('消息'),{target:{value:question}});fireEvent.click(screen.getByRole('button',{name:'发送消息'}));
+  await screen.findByText('多级页表按层级组织页表，减少未使用地址空间的内存占用。');
+  expect(screen.getByText('本地资料回答')).toBeTruthy();
+  expect(backend.calls.filter(c=>['/api/auto-route','/api/chat','/api/research/plan'].includes(c.url))).toHaveLength(0);
+});
+
+it('a combined local answer displays both source types and opens its original dialogue',async()=>{
+  const backend=installBackend();const original=backend.fetcher.getMockImplementation()!;
+  backend.state.conversations.push({id:'original',title:'TLB旧对话',providerId:'p',model:'model',createdAt:1,updatedAt:2,
+    messages:[{id:'u-old',role:'user',content:'TLB是什么，有什么用',timestamp:1},{id:'a-old',role:'assistant',content:'旧对话解释：TLB缓存地址转换结果。',timestamp:2}]});
+  backend.fetcher.mockImplementation(async(input,init)=>{
+    const url=String(input);
+    if(url==='/api/content-library/reuse'){
+      const body=JSON.parse(String(init?.body));backend.calls.push({url,body});
+      return Response.json({request_id:body.request_id,decision:'miss',reason:'document_answer_available',answer:null,citations:[],trace:[],local_model:'',duration_ms:1,answer_origin:null});
+    }
+    if(url==='/api/knowledge/query'){
+      const body=JSON.parse(String(init?.body));backend.calls.push({url,body});
+      return Response.json({request_id:body.request_id,decision:'hit',reason:'',answer:'文档和旧对话共同解释了地址翻译缓存。',
+        citations:[{source_id:'doc',source_kind:'document',title:'memory.html',chunk_id:'doc-c',revision:1,locator:{kind:'file',path:'/memory.html'},position:{kind:'lines',start_line:1},quote:'TLB缓存物理页地址。'},
+          {source_id:'history',source_kind:'api_chat',title:'TLB是什么，有什么用',chunk_id:'chat-c',revision:1,locator:{kind:'chat',conversation_id:'original',assistant_message_id:'a-old'},position:{kind:'message',message_id:'a-old'},quote:'旧对话解释：TLB缓存地址转换结果。'}],
+        trace:[],local_model:'',duration_ms:1,answer_origin:'local_synthesis'});
+    }
+    return original(input,init);
+  });
+  render(<App/>);await screen.findByText('本地优先');
+  fireEvent.change(screen.getByLabelText('消息'),{target:{value:'什么是TLB'}});fireEvent.click(screen.getByRole('button',{name:'发送消息'}));
+  await screen.findByText('本地资料综合回答');fireEvent.click(screen.getByText('引用来源（2）'));
+  expect(screen.getByText('来源为历史模型回答')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button',{name:/\[2\].*TLB是什么/}));
+  await screen.findByText('旧对话解释：TLB缓存地址转换结果。');
+  expect(backend.calls.filter(c=>c.url==='/api/chat')).toHaveLength(0);
+});
+
 it('real App creates a local conversation when no online provider exists',async()=>{
   const backend=installBackend(false);backend.state.conversations=[];backend.state.activeConversationId=null;render(<App/>);
   await screen.findByText('New Chat');

@@ -18,6 +18,7 @@ def test_synonym_hit_then_source_update_then_miss(tmp_path):
     def chat(payload):
         p=json.loads(payload['messages'][-1]['content']);kind=p['task']
         if kind=='prepare':data={'kind':'qa','retrieval_question':p['question'],'constraints':[],'context_basis':[]}
+        elif kind=='select_excerpts':data={'qa':True,'hit':False,'ids':[]}
         elif kind=='match':data={'answerable':True,'matched_constraints':p['constraint_ids'],'unresolved_constraints':[],'conflicts':[]}
         elif kind=='generate':data={'answerable':True,'answer':'A 型号保修三年 [1]','matched_constraints':p['constraint_ids'],'unresolved_constraints':[],'conflicts':[],
             'claims':[{'text':'A 型号保修三年','citations':[{'chunk_id':p['chunks'][0]['id'],'quote':p['chunks'][0]['text']}]}]}

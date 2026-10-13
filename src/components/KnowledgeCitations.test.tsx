@@ -16,6 +16,12 @@ it('a changed revision displays an error and never old text',async()=>{
   expect(await screen.findByText(/来源已变更/)).toBeTruthy();
   expect(screen.queryByText('保修三年')).toBeNull();
 });
+it('an unfinished index explains that indexing must be retried',async()=>{
+  vi.stubGlobal('fetch',vi.fn(async()=>Response.json({error:'index_pending'},{status:409})));
+  render(<KnowledgeSourceViewer sourceId="s" revision={2} position={citation.position}/>);
+  expect(await screen.findByText(/尚未完成索引/)).toBeTruthy();
+  expect(screen.queryByText(/来源已变更/)).toBeNull();
+});
 it('PDF and DOCX citations show real page and table positions',()=>{
   render(<KnowledgeCitations citations={[{...citation,chunk_id:'pdf',position:{kind:'pdf_page',page:3}},{...citation,chunk_id:'docx',position:{kind:'docx',table:1,row:2,column:3}}]} onOpen={()=>{}}/>);
   fireEvent.click(screen.getByText('引用来源（2）'));
