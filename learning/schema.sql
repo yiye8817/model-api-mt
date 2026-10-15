@@ -32,3 +32,6 @@ CREATE TABLE IF NOT EXISTS concept_mentions (
 CREATE TABLE IF NOT EXISTS relations (id TEXT NOT NULL, analysis_id TEXT NOT NULL REFERENCES analyses(id), body TEXT NOT NULL, PRIMARY KEY(id,analysis_id));
 CREATE TABLE IF NOT EXISTS relation_evidence (relation_id TEXT NOT NULL, analysis_id TEXT NOT NULL, body TEXT NOT NULL,
     FOREIGN KEY(relation_id,analysis_id) REFERENCES relations(id,analysis_id));
+CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS turns (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id), body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS explorations (id TEXT PRIMARY KEY, concept_id TEXT NOT NULL, body TEXT NOT NULL);

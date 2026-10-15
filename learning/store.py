@@ -249,3 +249,57 @@ class LearningStore:
     def active_analyses(self):
         with self.connection() as db:
             return [json.loads(r['body']) for r in db.execute('SELECT a.body FROM analyses a JOIN documents d ON a.document_id=d.id AND a.revision=d.revision WHERE d.deleted=0 AND json_extract(d.body,\'$.analysis_id\')=a.id')]
+
+    def save_turn(self, conversation_id, question, answer, scope, revisions, job_id):
+        with self.connection() as db:
+            self.assert_publishable(db,job_id,revisions)
+            if conversation_id:
+                row = db.execute('SELECT body FROM conversations WHERE id=?',(conversation_id,)).fetchone()
+                if not row:
+                    raise LearningError('问答会话不存在',404)
+                conversation = json.loads(row['body'])
+            else:
+                conversation_id = uuid.uuid4().hex
+                conversation = {'id':conversation_id,'title':question[:100],'scope':scope,'document_revisions':revisions,'created_at':now()}
+            conversation['updated_at'] = now()
+            db.execute('INSERT OR REPLACE INTO conversations VALUES(?,?)',(conversation_id,dumps(conversation)))
+            turn = {**answer,'id':uuid.uuid4().hex,'question':question,'created_at':now(),'document_revisions':revisions}
+            db.execute('INSERT INTO turns VALUES(?,?,?)',(turn['id'],conversation_id,dumps(turn)))
+            return {'conversation_id':conversation_id,'turn':turn}
+
+    def get_conversation(self, conversation_id):
+        with self.connection() as db:
+            row = db.execute('SELECT body FROM conversations WHERE id=?',(conversation_id,)).fetchone()
+            if not row:
+                raise LearningError('问答会话不存在',404)
+            conversation = json.loads(row['body'])
+            conversation['turns'] = [json.loads(r['body']) for r in db.execute('SELECT body FROM turns WHERE conversation_id=? ORDER BY rowid',(conversation_id,))]
+        conversation['needs_update'] = not self.revisions_current(conversation['document_revisions'])
+        return conversation
+
+    def list_conversations(self, filters, page=1, page_size=30):
+        with self.connection() as db:
+            values = [json.loads(r['body']) for r in db.execute('SELECT body FROM conversations ORDER BY rowid DESC')]
+        values = [v for v in values if not filters.get('document_id') or filters['document_id'] in v['document_revisions']]
+        return paginate(values,page,page_size)
+
+    def save_exploration(self, concept_id, result, revisions, job_id):
+        value = {**result,'id':uuid.uuid4().hex,'concept_id':concept_id,'document_revisions':revisions,'created_at':now()}
+        with self.connection() as db:
+            self.assert_publishable(db,job_id,revisions)
+            db.execute('INSERT INTO explorations VALUES(?,?,?)',(value['id'],concept_id,dumps(value)))
+        return value
+
+    def get_explorations(self, concept_id):
+        with self.connection() as db:
+            return [json.loads(r['body']) for r in db.execute('SELECT body FROM explorations WHERE concept_id=? ORDER BY rowid DESC',(concept_id,))]
+
+    def get_learning_record(self, origin):
+        table = {'turn':'turns','exploration':'explorations'}.get(origin.get('kind'))
+        if not table:
+            raise LearningError('笔记来源类型无效')
+        with self.connection() as db:
+            row = db.execute(f'SELECT body FROM {table} WHERE id=?',(origin.get('id'),)).fetchone()
+            if not row:
+                raise LearningError('学习记录不存在',404)
+            return json.loads(row['body'])
