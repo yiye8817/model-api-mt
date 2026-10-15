@@ -1484,6 +1484,8 @@ class _HermesSession:
         self._lock = threading.Lock()
         self._running = False
         self._proc = None
+        self._finished = threading.Event()
+        self._finished.set()
 
     def start(self):
         cli = _hermes_cli_path()
@@ -1531,6 +1533,7 @@ class _HermesSession:
                 self.send_json({"type": "error", "error": "上一条消息仍在处理中"})
                 return
             self._running = True
+            self._finished.clear()
         threading.Thread(target=self._run_query, args=(cmd, env), daemon=True).start()
 
     @staticmethod
@@ -1622,15 +1625,20 @@ class _HermesSession:
         event_r = event_w = None
         event_thread = None
         try:
+            if not self.alive:
+                return
             event_r, event_w = os.pipe()
             env = dict(env)
             env['HERMES_EVENT_FD'] = str(event_w)
-            proc = subprocess.Popen(
-                cmd, cwd=self.cwd, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, pass_fds=(event_w,),
-            )
-            self._proc = proc
+            with self._lock:
+                if not self.alive:
+                    return
+                proc = subprocess.Popen(
+                    cmd, cwd=self.cwd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, pass_fds=(event_w,),
+                )
+                self._proc = proc
             os.close(event_w)
             event_w = None
 
@@ -1702,16 +1710,22 @@ class _HermesSession:
                     pass
             with self._lock:
                 self._running = False
+            self._finished.set()
             self.send_json({'type': 'done'})
 
     def close(self, cleanup_only=False):
-        self.alive = False
-        proc = self._proc
+        with self._lock:
+            self.alive = False
+            proc = self._proc
         if proc and proc.poll() is None:
             try:
                 proc.terminate()
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
             except Exception:
                 pass
+        self._finished.wait(timeout=5)
         if self.token:
             _unregister_claude_provider(self.token)
             self.token = None

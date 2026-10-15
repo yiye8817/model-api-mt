@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
+import uuid
 
 from .contracts import LearningError, digest, dumps, now, paginate, text
 
@@ -144,3 +145,49 @@ class LearningStore:
                 if not row or row['deleted'] or row['revision'] != revision:
                     return False
         return True
+
+    def create_job(self, kind, payload, revisions, dedupe_key=None):
+        job = {'id': uuid.uuid4().hex, 'kind': kind, 'payload': payload, 'document_revisions': revisions,
+               'dedupe_key': dedupe_key, 'status':'queued', 'phase':'queued', 'processed':0, 'total':0,
+               'message':'等待处理', 'error':None, 'result':None, 'created_at':now(), 'updated_at':now()}
+        with self.connection() as db:
+            db.execute('INSERT INTO jobs VALUES(?,?,?)', (job['id'], job['status'], dumps(job)))
+        return job
+
+    def get_job(self, job_id):
+        with self.connection() as db:
+            row = db.execute('SELECT body FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                raise LearningError('任务不存在', 404)
+            return json.loads(row['body'])
+
+    def active_jobs(self):
+        with self.connection() as db:
+            return [json.loads(r['body']) for r in db.execute("SELECT body FROM jobs WHERE status IN ('queued','running')")]
+
+    def update_job(self, job_id, **patch):
+        with self.connection() as db:
+            row = db.execute('SELECT body FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                raise LearningError('任务不存在', 404)
+            job = {**json.loads(row['body']), **patch, 'updated_at':now()}
+            db.execute('UPDATE jobs SET status=?,body=? WHERE id=?', (job['status'], dumps(job), job_id))
+            return job
+
+    def transition_job(self, job_id, expected, patch):
+        with self.lock:
+            job = self.get_job(job_id)
+            if job['status'] not in expected:
+                return False
+            self.update_job(job_id, **patch)
+            return True
+
+    def assert_publishable(self, db, job_id, revisions):
+        if job_id:
+            row = db.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row or row['status'] != 'running':
+                raise LearningError('任务已取消', 409)
+        for doc_id, revision in revisions.items():
+            row = db.execute('SELECT revision,deleted FROM documents WHERE id=?', (doc_id,)).fetchone()
+            if not row or row['deleted'] or row['revision'] != revision:
+                raise LearningError('资料已更新或移除', 409)
