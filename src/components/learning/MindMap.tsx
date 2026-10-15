@@ -1,10 +1,19 @@
-import {useMemo,useState} from 'react';
+import {useEffect,useMemo,useState} from 'react';
 import type {LearningCitation,MindMapNode} from '../../lib/learningTypes';
 import GraphViewport from './GraphViewport';
 import {Citations} from './shared';
 
 export default function MindMap({tree,onOpenCitation,selectedConceptId}:{tree:MindMapNode;onOpenCitation:(c:LearningCitation)=>void;selectedConceptId?:string|null}){
   const [collapsed,setCollapsed]=useState<Set<string>>(new Set()),[selected,setSelected]=useState<MindMapNode|null>(null);
+  useEffect(()=>{
+    if(!selectedConceptId)return;
+    const find=(node:MindMapNode,path:string[]):{node:MindMapNode;path:string[]}|null=>{
+      if(node.concept_id===selectedConceptId)return {node,path};
+      for(const child of node.children){const found=find(child,[...path,node.id]);if(found)return found;}return null;
+    };
+    const found=find(tree,[]);if(!found)return;
+    setCollapsed(old=>new Set([...old].filter(id=>!found.path.includes(id))));setSelected(found.node);
+  },[tree,selectedConceptId]);
   const layout=useMemo(()=>{
     const nodes:{node:MindMapNode;x:number;y:number;parent?:string}[]=[];
     const visit=(node:MindMapNode,depth:number,parent?:string)=>{
