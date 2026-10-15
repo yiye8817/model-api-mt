@@ -303,3 +303,20 @@ class LearningStore:
             if not row:
                 raise LearningError('学习记录不存在',404)
             return json.loads(row['body'])
+
+    def save_archive(self, value, job_id=None):
+        with self.connection() as db:
+            if job_id:
+                self.assert_publishable(db,job_id,value['document_revisions'])
+            db.execute('INSERT INTO archives VALUES(?,?)',(value['id'],dumps(value)))
+
+    def get_archive(self, archive_id):
+        with self.connection() as db:
+            row = db.execute('SELECT body FROM archives WHERE id=?',(archive_id,)).fetchone()
+            if not row:
+                raise LearningError('归档不存在',404)
+            return json.loads(row['body'])
+
+    def list_archives(self):
+        with self.connection() as db:
+            return [json.loads(r['body']) for r in db.execute('SELECT body FROM archives ORDER BY rowid DESC')]
