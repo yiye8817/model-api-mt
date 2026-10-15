@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import uuid
+import unicodedata
 
 from .contracts import LearningError, digest, dumps, now, paginate, text
 
@@ -191,3 +192,60 @@ class LearningStore:
             row = db.execute('SELECT revision,deleted FROM documents WHERE id=?', (doc_id,)).fetchone()
             if not row or row['deleted'] or row['revision'] != revision:
                 raise LearningError('资料已更新或移除', 409)
+
+    def commit_analysis(self, document_id, revision, analysis, job_id):
+        value = json.loads(dumps(analysis))
+        value.update(id=uuid.uuid4().hex, document_id=document_id, revision=revision, created_at=now())
+        mapping, concepts = {}, {}
+        for concept in value['concepts']:
+            normalize = lambda s: ' '.join(unicodedata.normalize('NFKC', s).casefold().split())
+            canonical = digest(normalize(concept['domain'])+'\n'+normalize(concept['name']))[:32]
+            mapping[concept['id']] = canonical
+            if canonical in concepts:
+                concepts[canonical]['citations'].extend(concept['citations'])
+            else:
+                concepts[canonical] = {**concept, 'id':canonical, 'document_ids':[document_id]}
+        value['concepts'] = list(concepts.values())
+        def remap(node):
+            if node.get('concept_id'):
+                node['concept_id'] = mapping[node['concept_id']]
+            for child in node['children']:
+                remap(child)
+        remap(value['tree'])
+        for relation in value['relations']:
+            relation.update(source=mapping[relation['source']], target=mapping[relation['target']])
+            relation['id'] = digest(dumps([relation['source'],relation['target'],relation['type']]))[:32]
+        with self.connection() as db:
+            self.assert_publishable(db, job_id, {document_id:revision})
+            doc = self._document(db, document_id)
+            db.execute('INSERT INTO analyses VALUES(?,?,?,?)', (value['id'],document_id,revision,dumps(value)))
+            for concept in value['concepts']:
+                db.execute('INSERT OR IGNORE INTO concepts VALUES(?,?,?)', (concept['id'],concept['name'],concept['domain']))
+                db.execute('INSERT INTO concept_mentions VALUES(?,?,?)', (concept['id'],value['id'],dumps(concept)))
+            for relation in value['relations']:
+                db.execute('INSERT OR REPLACE INTO relations VALUES(?,?,?)', (relation['id'],value['id'],dumps(relation)))
+                for citation in relation['citations']:
+                    db.execute('INSERT INTO relation_evidence VALUES(?,?,?)', (relation['id'],value['id'],dumps(citation)))
+            for field in ('category','tags'):
+                if field not in doc.get('manual', []):
+                    doc[field] = value[field]
+            doc.update(analysis_id=value['id'], status='completed', updated_at=now())
+            db.execute('UPDATE documents SET body=? WHERE id=?', (dumps(doc),document_id))
+        return value
+
+    def get_analysis(self, document_id, revision=None):
+        with self.connection() as db:
+            doc = self._document(db, document_id)
+            if revision is None:
+                row = db.execute('SELECT body FROM analyses WHERE id=?', (doc.get('analysis_id'),)).fetchone()
+            else:
+                row = db.execute('SELECT body FROM analyses WHERE document_id=? AND revision=? ORDER BY rowid DESC LIMIT 1', (document_id,revision)).fetchone()
+            if not row:
+                raise LearningError('文档尚未生成分析与思维导图', 404)
+            value = json.loads(row['body'])
+            value['needs_update'] = value['revision'] != doc['revision']
+            return value
+
+    def active_analyses(self):
+        with self.connection() as db:
+            return [json.loads(r['body']) for r in db.execute('SELECT a.body FROM analyses a JOIN documents d ON a.document_id=d.id AND a.revision=d.revision WHERE d.deleted=0 AND json_extract(d.body,\'$.analysis_id\')=a.id')]

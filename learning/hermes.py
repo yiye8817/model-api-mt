@@ -4,8 +4,31 @@ import queue
 import shutil
 import tempfile
 import time
+import json
 
 from .contracts import LearningError
+
+
+def request_json(hermes, instructions, data, context, validator, options=None):
+    options = options or {}
+    correction = ''
+    for attempt in range(2):
+        context.ensure_active()
+        prompt = instructions+correction+'\nINPUT_JSON\n'+json.dumps(data, ensure_ascii=False)
+        answer = hermes.request(prompt, context.cancel_event, lambda message: context.progress('hermes', message=message),
+                                provider_id=options.get('provider_id'), model=options.get('model'))
+        try:
+            raw = answer.strip()
+            if raw.startswith('```'):
+                raw = raw.split('\n', 1)[-1].rsplit('```', 1)[0]
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                raise LearningError('Hermes 输出必须为 JSON 对象')
+            return validator(value)
+        except (ValueError, TypeError, KeyError, RecursionError) as exc:
+            if attempt:
+                raise LearningError('Hermes 输出结构或引用校验失败：'+str(exc)[:300], 502) from exc
+            correction = '\n上次输出校验失败，请修正并仅返回 JSON：'+str(exc)[:300]
 
 
 class HermesClient:
