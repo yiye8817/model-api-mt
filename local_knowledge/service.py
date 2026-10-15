@@ -3,6 +3,7 @@ import threading
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
+from knowledge.freshness import needs_current_information
 
 from .config import request_fingerprint, stable_hash, model_fingerprint, qa_configured
 from .contracts import QueryResult, Citation, Position
@@ -50,7 +51,7 @@ class KnowledgeService:
             if not check_file_freshness(s):
                 self.store.invalidate_source(source_id,status='stale'); raise EvidenceError('source_changed' if final else 'stale_source')
             budget.check()
-        if re.search(r'最新|当前|现在|今日|今天|\blatest\b|\bcurrently\b|\btoday\b',question,re.I):
+        if needs_current_information(question):
             if any(self.store.get_source(sid).valid_until is None for sid in deps): raise EvidenceError('stale_source')
         for chunk in chunks:
             source=self.store.get_source(chunk.source_id)

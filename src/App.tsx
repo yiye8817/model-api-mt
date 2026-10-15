@@ -23,6 +23,8 @@ import { browserFileUrl, fileTargetName, isBrowserOpenableFile, resolveFileTarge
 import { DEFAULT_MODEL_CHAT_SITES } from './lib/modelChatSites';
 import { cancelKnowledge, recordKnowledge, recordKnowledgeOnlineCall, turnHash } from './lib/knowledgeApi';
 import { checkLocalFirst, createRequestGuard, knowledgeReasons } from './lib/knowledgeRouting';
+import { isCurrentInformationQuery, searchTimeLimit } from './lib/webResearch';
+import { consumeResearchStream, researchChannels } from './lib/researchStream';
 import type { Completion, KnowledgeQueryRequest } from './lib/knowledgeTypes';
 import type { Citation } from './lib/knowledgeTypes';
 import KnowledgePanel from './components/KnowledgePanel';
@@ -700,6 +702,22 @@ export default function App() {
     const history=conversationSnapshot.messages.map(m=>({role:m.role,content:m.content}));
     const globalSystem=settingsRef.current?.model_params.system_prompt||'';
     const styleConstraints=[...(conversationSnapshot.messages[0]?.role==='system'?[]:[globalSystem]),...history.filter(m=>m.role==='system').map(m=>m.content)].filter(Boolean).join('\n');
+    let preflightRoute: AutoRouteResult | undefined;
+    if (autoRouteEnabled && content.trim() && !options?.webChatTargets?.length
+      && (!attemptKnowledge || localSettings?.online_fallback !== false)) {
+      setKnowledgeProgress('判断是否需要最新资料');
+      try {
+        const response = await fetch('/api/auto-route', {
+          method: 'POST', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+          body: JSON.stringify({ message: content, recent_messages: history.slice(-6) }),
+        });
+        if (response.ok) preflightRoute = await response.json() as AutoRouteResult;
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn('auto-route preflight failed', error);
+      }
+    }
+    const requiresWebSearch = options?.webSearch || preflightRoute?.requires_web_search || preflightRoute?.intent === '讯息' || preflightRoute?.role === 'web_search';
     const query:KnowledgeQueryRequest={request_id:requestId,question:content,context:history,system_constraints:styleConstraints,
       source_ids:localSettings?.selected_source_ids||[],mode:options?.webChatTargets?.length?'web':'api',
       online_target:options?.webChatTargets?.length?{kind:'web',target_ids:options.webChatTargets}:activeProvider?{kind:'api',provider_id:activeProvider.id,model:activeProvider.selectedModel}:null,
@@ -712,13 +730,13 @@ export default function App() {
         if(data&&requestGuardRef.current.isCurrent(requestId)&&progressLabels[data.stage])setKnowledgeProgress(progressLabels[data.stage]);
       }).catch(()=>{});
     },500):null;
-    const localRoute=await checkLocalFirst(query,{enabled:attemptKnowledge,onlineFallback:localSettings?.online_fallback!==false,signal:controller.signal});
+    const localRoute=await checkLocalFirst(query,{enabled:attemptKnowledge,onlineFallback:localSettings?.online_fallback!==false,signal:controller.signal,requiresWebSearch});
     if(poll!==null)window.clearInterval(poll);
     const finish=()=>requestGuardRef.current.finishRequest(requestId,()=>{
       activeRequestRef.current=null;if(abortControllerRef.current===controller)abortControllerRef.current=null;
       setIsLoading(false);setStreamingContent('');setKnowledgeProgress('');
     });
-    if(localRoute.decision==='hit'||localRoute.decision==='cancelled'||localRoute.decision==='blocked'||!activeProvider){
+    if(localRoute.decision==='hit'||localRoute.decision==='cancelled'||localRoute.decision==='blocked'||controller.signal.aborted||!activeProvider){
       const hit=localRoute.decision==='hit'?localRoute.result:null;
       const cancelled=localRoute.decision==='cancelled'||controller.signal.aborted;
       const reason=localRoute.decision==='hit'?'':localRoute.reason;
@@ -750,6 +768,7 @@ export default function App() {
     let effectiveProvider: APIProvider = activeProvider;
     let autoRouteInfo: ChatMessage['autoRoute'] | undefined;
     let autoRouteData: AutoRouteResult | undefined;
+    let latestInformation = isCurrentInformationQuery(content);
     const sendOptions: { webSearch?: boolean } = { ...(options || {}) };
     const desktopForWebChat = getDesktop();
     const selectedWebChatTargets = (options?.webChatTargets || [])
@@ -758,75 +777,62 @@ export default function App() {
     const webChatMode = !!desktopForWebChat && selectedWebChatTargets.length > 0 && !!content.trim();
     let createdNewConv = false;
 
-    if (autoRouteEnabled && content.trim() && !webChatMode) {
-      try {
-        const recent = activeConversation.messages.slice(-6).map(m => ({
-          role: m.role,
-          content: typeof m.content === 'string' ? m.content : '',
+    if (preflightRoute && !webChatMode) {
+      const data = preflightRoute;
+      autoRouteData = data;
+      // 1) 是否新建对话
+      if (!data.same_topic && activeConversation.messages.length > 0) {
+        const newConv: Conversation = {
+          id: crypto.randomUUID(),
+          title: (content || 'New Chat').slice(0, 40) + ((content || '').length > 40 ? '...' : ''),
+          messages: [],
+          providerId: activeProvider.id,
+          model: activeProvider.selectedModel,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        setState(prev => ({
+          ...prev,
+          conversations: [newConv, ...prev.conversations],
+          activeConversationId: newConv.id,
         }));
-        const r = await fetch('/api/auto-route', {
-          method: 'POST',
-          signal: controller.signal,
-          headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
-          body: JSON.stringify({ message: content, recent_messages: recent }),
-        });
-        if (r.ok) {
-          const data = await r.json() as AutoRouteResult;
-          if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
-          autoRouteData = data;
-          // 1) 是否新建对话
-          if (!data.same_topic && activeConversation.messages.length > 0) {
-            const newConv: Conversation = {
-              id: crypto.randomUUID(),
-              title: (content || 'New Chat').slice(0, 40) + ((content || '').length > 40 ? '...' : ''),
-              messages: [],
-              providerId: activeProvider.id,
-              model: activeProvider.selectedModel,
-              createdAt: Date.now(),
-              updatedAt: Date.now(),
-            };
-            setState(prev => ({
-              ...prev,
-              conversations: [newConv, ...prev.conversations],
-              activeConversationId: newConv.id,
-            }));
-            effectiveConversation = newConv;
-            createdNewConv = true;
-          }
-          // 2) 选用角色对应的 provider/model
-          if (data.target?.kind === 'role' && data.target.providerId && data.target.model) {
-            const p = stateRef.current.providers.find(x => x.id === data.target.providerId);
-            if (p) {
-              effectiveProvider = { ...p, selectedModel: data.target.model || p.selectedModel };
-              if (createdNewConv) {
-                effectiveConversation = { ...effectiveConversation, providerId: p.id, model: effectiveProvider.selectedModel };
-              }
-            }
-          }
-          // 3) "讯息" 类自动开启联网搜索
-          if (data.role === 'web_search') {
-            sendOptions.webSearch = true;
-          }
-          autoRouteInfo = {
-            intent: data.intent,
-            complexity: data.complexity,
-            role: data.role,
-            providerName: data.target?.providerName || effectiveProvider.name,
-            model: data.target?.model || effectiveProvider.selectedModel,
-            sameTopic: data.same_topic,
-            fallbackFrom: data.target?.fallback_from,
-            keywords: data.keywords,
-            reason: data.reason,
-            trace: data.trace,
-          };
-        } else {
-          // 后端返回错误时（例如 intent 模型未配置）：静默继续走默认 provider
-          const errText = await r.text().catch(() => '');
-          console.warn('auto-route http error', r.status, errText);
-        }
-      } catch (e) {
-        console.warn('auto-route failed', e);
+        effectiveConversation = newConv;
+        createdNewConv = true;
       }
+      // 2) 选用角色对应的 provider/model
+      if (data.target?.kind === 'role' && data.target.providerId && data.target.model) {
+        const p = stateRef.current.providers.find(x => x.id === data.target.providerId);
+        if (p) {
+          effectiveProvider = { ...p, selectedModel: data.target.model || p.selectedModel };
+          if (createdNewConv) {
+            effectiveConversation = { ...effectiveConversation, providerId: p.id, model: effectiveProvider.selectedModel };
+          }
+        }
+      }
+      // 3) "讯息" 类自动开启联网搜索
+      if (data.role === 'web_search' || data.requires_web_search || data.intent === '讯息') {
+        latestInformation = true;
+        sendOptions.webSearch = true;
+      }
+      autoRouteInfo = {
+        intent: data.intent,
+        complexity: data.complexity,
+        role: data.role,
+        providerName: data.target?.providerName || effectiveProvider.name,
+        model: data.target?.model || effectiveProvider.selectedModel,
+        sameTopic: data.same_topic,
+        fallbackFrom: data.target?.fallback_from,
+        keywords: data.keywords,
+        reason: data.reason,
+        trace: data.trace,
+      };
+    }
+
+    if ((latestInformation || sendOptions.webSearch) && !webChatMode && !pluginEnabled) {
+      sendOptions.webSearch = true;
+      effectiveProvider = activeProvider;
+      if (autoRouteInfo) autoRouteInfo = { ...autoRouteInfo, role: 'web_search',
+        providerName: effectiveProvider.name, model: effectiveProvider.selectedModel };
     }
 
     if(controller.signal.aborted){
@@ -837,7 +843,9 @@ export default function App() {
     // 决定是否进入「讯息」检索研究工作流：讯息意图 → 全量检索；同话题的格式/内容微调 → 复用上次来源
     const ADJUSTABLE_INTENTS = new Set(['文字润色', '问答', '数据分析', '未知']);
     let researchMode: 'full' | 'adjust' | null = null;
-    if (autoRouteEnabled && content.trim() && autoRouteData && !pluginEnabled && (!attachments || attachments.length === 0)) {
+    if ((latestInformation || sendOptions.webSearch) && !webChatMode && !pluginEnabled && !attachments?.length) {
+      researchMode = 'full';
+    } else if (autoRouteEnabled && content.trim() && autoRouteData && !pluginEnabled && (!attachments || attachments.length === 0)) {
       if (autoRouteData.intent === '讯息') {
         researchMode = 'full';
       } else if (
@@ -1166,14 +1174,17 @@ export default function App() {
 
       // ---------- 「讯息」检索研究工作流（内联）：规划检索 → 联网搜索抓正文 → 结构化整理 ----------
       if (researchMode) {
+        const synthesisProvider = stateRef.current.providers.find(p => p.isDefault && p.baseUrl.trim() &&
+          (p.selectedModel || p.models[0] || '').trim()) || activeProvider;
+        const synthesisModel = (synthesisProvider.selectedModel || synthesisProvider.models[0] || '').trim();
         const assistantId = crypto.randomUUID();
         const placeholder: ChatMessage = {
           id: assistantId,
           role: 'assistant',
           content: researchMode === 'adjust' ? '🔁 正在按新的要求重新整理…' : '🔎 正在检索…',
           timestamp: Date.now(),
-          providerId: effectiveProvider.id,
-          model: effectiveProvider.selectedModel,
+          providerId: synthesisProvider.id,
+          model: synthesisModel,
           autoRoute: autoRouteInfo,
           research: { steps: [] },
         };
@@ -1205,102 +1216,80 @@ export default function App() {
           }));
 
         try {
-          const wsCfg = settingsRef.current?.web_search;
+          const researchModel = { baseUrl: activeProvider.baseUrl, apiKey: activeProvider.apiKey,
+            apiType: activeProvider.apiType, model: activeProvider.selectedModel, providerId: activeProvider.id };
+          const synthesisRequest = { baseUrl: synthesisProvider.baseUrl, apiKey: synthesisProvider.apiKey,
+            apiType: synthesisProvider.apiType, model: synthesisModel, providerId: synthesisProvider.id };
+          let answerProviderId = synthesisProvider.id;
+          let answerModel = synthesisModel;
+          let answer = '';
+          let finishReason = '';
           let rawSources: any[] = [];
-          let synthQuery = content.trim();
-          let synthInstruction = '';
-
           if (researchMode === 'adjust') {
-            const prev = lastResearchRef.current[effectiveConversation.id];
-            rawSources = prev?.rawSources || [];
-            synthQuery = prev?.query || content.trim();
-            synthInstruction = content.trim();
+            const previous = lastResearchRef.current[effectiveConversation.id];
+            rawSources = previous?.rawSources || [];
             addStep('复用已检索来源', `${rawSources.length} 个来源，按新要求重新整理`);
+            const response = await fetch('/api/research/synthesize', {
+              method: 'POST', signal: controller.signal,
+              headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+              body: JSON.stringify({ ...synthesisRequest, query: previous?.query || content.trim(),
+                instruction: content.trim(), sources: rawSources.map(source => ({...source,
+                  content: source.summary || source.content || '', snippet: source.summary || source.snippet || ''})),
+                context: history, system_constraints: styleConstraints }),
+            });
+            if (!response.ok) throw new Error(`整理失败 (${response.status})`);
+            const result = await response.json();answer = result.answer;finishReason = result.finish_reason;
+            answerProviderId = result.provider_id || synthesisProvider.id;
+            answerModel = result.model || synthesisModel;
           } else {
-            addStep('规划检索', '生成关键词与候选站点…');
-            let queries: string[] = [content.trim()];
-            let sites: string[] = [];
-            let keywords: string[] = [];
-            try {
-              const pr = await fetch('/api/research/plan', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
-                signal: controller.signal,
-                body: JSON.stringify({ query: content.trim() }),
-              });
-              if (pr.ok) {
-                const pd = await pr.json();
-                if (Array.isArray(pd.queries) && pd.queries.length) queries = pd.queries;
-                if (Array.isArray(pd.sites)) sites = pd.sites;
-                if (Array.isArray(pd.keywords)) keywords = pd.keywords;
-                updateA(m => ({ ...m, research: { ...(m.research || { steps: [] }), keywords, sites } }));
-                addStep('检索方案', `关键词: ${keywords.join('、') || '—'}${sites.length ? ' · 站点: ' + sites.join(', ') : ''}`);
-              } else {
-                addStep('规划检索', '失败，使用原始查询', 'warn');
+            addStep('综合搜索', '当前 Provider、OpenCLI 各站点与 DDGS 正在检索…');
+            const response = await fetch('/api/research/stream', {
+              method: 'POST', signal: controller.signal,
+              headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+              body: JSON.stringify({ ...researchModel, providerName: activeProvider.name, query: content.trim(),
+                web_search: true, latest: latestInformation, context: history, system_constraints: styleConstraints }),
+            });
+            const result = await consumeResearchStream(response, controller.signal, event => {
+              if (controller.signal.aborted || !requestGuardRef.current.isCurrent(requestId)) return;
+              if (event.type === 'status') {
+                const channel = researchChannels[event.channel || ''] || event.channel || '检索';
+                const language = event.query_language === 'zh' ? ' · 中文' : event.query_language === 'en' ? ' · 英文' : '';
+                const running = event.channel === 'parsing' ? '解析中' : event.channel === 'synthesis' ? '整合中' : event.channel === 'keywords' ? '提取中' : '检索中';
+                const state = { running, retrying: '重试中', done: '完成', error: '失败' }[event.status || 'running'];
+                addStep(`${channel}${language} · ${state}`, event.detail || event.search_query || '', event.status === 'error' ? 'warn' : 'done');
               }
-            } catch {
-              addStep('规划检索', '失败，使用原始查询', 'warn');
-            }
-
-            const seen = new Set<string>();
-            const mergedSites = [...new Set([...(sites || []), ...((wsCfg?.preferred_sites) || [])])];
-            for (const q of queries.slice(0, 3)) {
-              try {
-                const sr = await fetch('/api/web-search', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
-                  signal: controller.signal,
-                  body: JSON.stringify({
-                    query: q,
-                    provider: wsCfg?.provider,
-                    max_results: wsCfg?.max_results ?? 5,
-                    preferred_sites: mergedSites,
-                    fetch_full_content: true,
-                    max_content_chars: wsCfg?.max_content_chars ?? 4000,
-                    keys: wsCfg?.keys,
-                  }),
+              if (event.type === 'plan') {
+                updateA(message => ({ ...message, research: { ...(message.research || { steps: [] }),
+                  keywords: [...new Set(Object.values(event.keywords || {}).flat())],
+                  queries: event.queries, keywordModel: event.keyword_model } }));
+              }
+              if (event.type === 'result' && event.result) {
+                const source = event.result;
+                updateA(message => {
+                  const previous = message.research?.results || [];
+                  const index = previous.findIndex(item => item.id === source.id);
+                  const results = [...previous];
+                  if (index < 0) results.push(source);else results[index] = source;
+                  return { ...message, research: { ...(message.research || { steps: [] }), results } };
                 });
-                const sd = await sr.json();
-                const results = (sd.results || []) as any[];
-                let added = 0;
-                for (const rr of results) {
-                  const url = rr.url || rr.link || '';
-                  if (!url || seen.has(url)) continue;
-                  seen.add(url);
-                  added++;
-                  rawSources.push({ title: rr.title || rr.fetched_title || '', url, content: rr.content || '', snippet: rr.snippet || '' });
-                }
-                addStep('联网搜索', `「${q}」→ ${added} 条 (${sd.provider || 'web'})`);
-              } catch {
-                addStep('联网搜索', `「${q}」失败`, 'warn');
               }
-            }
-            rawSources = rawSources.slice(0, 8);
-            addStep('抓取正文', `共 ${rawSources.length} 个来源`);
+            });
+            answer = result.answer || '';finishReason = result.finish_reason || '';
+            answerProviderId = result.provider_id || synthesisProvider.id;
+            answerModel = result.model || synthesisModel;
+            rawSources = result.sources || [];
             lastResearchRef.current[effectiveConversation.id] = { query: content.trim(), rawSources };
           }
-
-          addStep('整理输出', '调用模型汇总…');
-          const syn = await fetch('/api/research/synthesize', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
-            signal: controller.signal,
-            body: JSON.stringify({ query: synthQuery, instruction: synthInstruction, sources: rawSources }),
-          });
-          if (!syn.ok) {
-            const et = await syn.text().catch(() => '');
-            throw new Error(`整理失败 (${syn.status}): ${et}`);
-          }
-          const synd = await syn.json();
-          const answer = synd.answer || '（未生成内容）';
-          const metadata=await completeMetadata(answer,'api');
-          if(controller.signal.aborted)throw new DOMException('Aborted','AbortError');
-          const usedSources: ChatSource[] = rawSources
-            .map(s => ({ title: s.title || '', url: s.url || '', snippet: s.snippet || (s.content ? s.content.slice(0, 160) : '') }))
-            .filter((s: ChatSource) => s.url);
-          addStep('完成', '', 'done');
-          updateA(m => ({ ...m, ...metadata, content: answer, sources: usedSources.length ? usedSources : undefined, timestamp: Date.now() }));
-          void collect({id:assistantId,role:'assistant',content:answer,timestamp:Date.now(),model:synd.model||'unknown',...metadata});
+          if (!answer.trim()) throw new Error('综合模型返回空回答');
+          const metadata = await completeMetadata(answer, 'api', finishReason === 'length' ? 'partial' : 'complete');
+          if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+          const usedSources: ChatSource[] = rawSources.map(source => ({ title: source.title || '', url: source.url || '',
+            snippet: source.summary || source.snippet || (source.content ? source.content.slice(0, 160) : '') })).filter(source => source.url);
+          addStep('完成');
+          updateA(message => ({ ...message, ...metadata, content: answer, providerId: answerProviderId,
+            model: answerModel, sources: usedSources.length ? usedSources : undefined, timestamp: Date.now() }));
+          void collect({ id: assistantId, role: 'assistant', content: answer, timestamp: Date.now(),
+            providerId: answerProviderId, model: answerModel, ...metadata });
         } catch (e: any) {
           if (e?.name === 'AbortError' || controller.signal.aborted) {
             aborted = true;
@@ -1453,19 +1442,23 @@ export default function App() {
           const wsCfg = settingsRef.current?.web_search;
           const searchRes = await fetch('/api/web-search', {
             method: 'POST',
+            signal: controller.signal,
             headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
             body: JSON.stringify({
               query: content.trim(),
-              provider: wsCfg?.provider,
+              provider: latestInformation ? 'duckduckgo' : wsCfg?.provider,
+              latest: latestInformation,
+              timelimit: latestInformation ? searchTimeLimit(content) : undefined,
               max_results: wsCfg?.max_results ?? 6,
               topic: wsCfg?.topic,
               preferred_sites: wsCfg?.preferred_sites,
-              fetch_full_content: wsCfg?.fetch_full_content ?? true,
+              fetch_full_content: latestInformation || (wsCfg?.fetch_full_content ?? true),
               max_content_chars: wsCfg?.max_content_chars ?? 4000,
               keys: wsCfg?.keys,
             }),
           });
           const searchData = await searchRes.json();
+          if (!searchRes.ok) throw new Error(searchData.error || '联网搜索失败');
           const results: Array<{ title?: string; snippet?: string; url?: string; link?: string; content?: string }> = searchData.results || [];
           if (results.length > 0) {
             collectedSources = results.map(r => ({
@@ -1483,7 +1476,9 @@ export default function App() {
               }).join('\n\n---\n\n');
             apiMessages = [{ role: 'system', content: searchBlock }, ...apiMessages];
           }
-        } catch (_) {
+          if (latestInformation && !results.length) throw new Error('未获取到有效网页资料，无法确认最新信息');
+        } catch (error) {
+          if (latestInformation || controller.signal.aborted) throw error;
           // 搜索失败时仍按原消息发送
         }
       }

@@ -4,6 +4,7 @@ import json
 import math
 import re
 import unicodedata
+from .freshness import needs_current_information
 
 
 def normalize_question(value):
@@ -16,8 +17,7 @@ def requires_fresh_context(question, context=None):
     pronoun = bool(re.search(r'^(他|她|它|这|那|上述|刚才|之前|继续)|\b(he|she|it|they|this|that)\b', question, re.I))
     prior_context = any(isinstance(message, dict) and message.get('role') in ('user', 'assistant')
                         and isinstance(message.get('content'), str) and message['content'].strip() for message in context)
-    return bool(re.search(r'最新|当前|现在|今日|今天|实时|\blatest\b|\bcurrently\b|\btoday\b', question, re.I)
-                or (pronoun and not prior_context))
+    return needs_current_information(question) or (pronoun and not prior_context)
 
 
 def hash_text(value):

@@ -128,6 +128,7 @@ export interface ChatSource {
   /** 整页正文（前端不必直接显示，仅用于 LLM 上下文）。 */
   content?: string;
   fetched_title?: string;
+  summary?: string;
 }
 
 export interface WebChatProgressEvent {
@@ -217,7 +218,36 @@ export interface ChatMessage {
     steps: AutoRouteTraceStep[];
     keywords?: string[];
     sites?: string[];
+    results?: WebResearchResult[];
+    queries?: ResearchSearchQuery[];
+    keywordModel?: string;
   };
+}
+
+export interface ResearchSearchQuery {
+  language: 'zh' | 'en' | 'original';
+  query: string;
+}
+
+export interface WebResearchResult {
+  id: string;
+  channel: string;
+  kind: 'source' | 'answer';
+  title: string;
+  url: string;
+  content?: string;
+  snippet?: string;
+  published_at?: string;
+  official_candidate?: boolean;
+  grounded?: boolean;
+  query_language?: ResearchSearchQuery['language'];
+  search_query?: string;
+  parse_status?: 'running' | 'success' | 'error';
+  parse_error?: string;
+  parse_method?: string;
+  parsed_chars?: number;
+  summary?: string;
+  resolved_url?: string;
 }
 
 // ============================================================
@@ -326,6 +356,7 @@ export interface AutoRouteTraceStep {
 /** /api/auto-route 的返回值。 */
 export interface AutoRouteResult {
   intent: string;
+  requires_web_search?: boolean;
   complexity: '简单' | '复杂' | null;
   keywords: string[];
   reason: string;

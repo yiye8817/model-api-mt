@@ -1,11 +1,13 @@
 import { queryKnowledge, querySavedAnswer, KnowledgeHttpError } from './knowledgeApi';
 import type { KnowledgeQueryRequest,KnowledgeQueryResult } from './knowledgeTypes';
+import { isCurrentInformationQuery } from './webResearch';
 
 export type LocalRouteResult={decision:'hit';result:KnowledgeQueryResult}|{decision:'fallback'|'blocked'|'cancelled';reason:string;result?:KnowledgeQueryResult};
 
-export async function checkLocalFirst(request:KnowledgeQueryRequest,options:{enabled:boolean;onlineFallback:boolean;signal:AbortSignal}):Promise<LocalRouteResult> {
+export async function checkLocalFirst(request:KnowledgeQueryRequest,options:{enabled:boolean;onlineFallback:boolean;signal:AbortSignal;requiresWebSearch?:boolean}):Promise<LocalRouteResult> {
   if(options.signal.aborted)return {decision:'cancelled',reason:'cancelled'};
   if(!options.enabled)return {decision:'fallback',reason:'disabled'};
+  if(options.requiresWebSearch||isCurrentInformationQuery(request.question))return {decision:options.onlineFallback?'fallback':'blocked',reason:'stale_source'};
   try {
     const saved=await querySavedAnswer(request,options.signal);
     if(options.signal.aborted||saved.decision==='cancelled')return {decision:'cancelled',reason:'cancelled'};

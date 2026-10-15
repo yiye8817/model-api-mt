@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import KnowledgeCitations from './KnowledgeCitations';
 import type {Citation} from '../lib/knowledgeTypes';
+import { isCurrentInformationQuery } from '../lib/webResearch';
+import { researchChannels } from '../lib/researchStream';
 import {
   Send, Loader2, Bot, User, AlertCircle, Sparkles,
   Paperclip, Image, FileText, X, File as FileIcon, RotateCcw, Pencil,
@@ -73,6 +75,8 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const [ttsPlaying, setTtsPlaying] = useState(false);
   const [useWebSearch, setUseWebSearch] = useState(false);
+  const automaticWebSearch = !pluginEnabled && isCurrentInformationQuery(input);
+  const webSearchEnabled = useWebSearch || automaticWebSearch;
   const [showAgentDialog, setShowAgentDialog] = useState(false);
   const [agentInitialGoal, setAgentInitialGoal] = useState('');
   const [agentMode, setAgentMode] = useState<'script' | 'project'>('script');
@@ -189,7 +193,7 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
       return;
     }
     const sendOptions = {
-      ...(useWebSearch ? { webSearch: true } : {}),
+      ...(webSearchEnabled ? { webSearch: true } : {}),
       ...(webChatEnabled ? { webChatTargets: selectedWebChatIds } : {}),
     };
     onSendMessage(
@@ -530,8 +534,8 @@ export default function ChatArea({ conversation, provider, onSendMessage, isLoad
               <button
                 onClick={() => setUseWebSearch(v => !v)}
                 disabled={!provider || busy}
-                title={useWebSearch ? '关闭联网搜索' : '开启联网搜索 (DuckDuckGo)'}
-                className={`p-2.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${useWebSearch ? 'text-emerald-400 bg-emerald-500/20' : 'text-gray-400 hover:text-emerald-400 hover:bg-gray-800'}`}
+                title={automaticWebSearch ? '已自动开启联网搜索：查询需要最新信息' : useWebSearch ? '关闭联网搜索' : '开启综合联网搜索'}
+                className={`p-2.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${webSearchEnabled ? 'text-emerald-400 bg-emerald-500/20' : 'text-gray-400 hover:text-emerald-400 hover:bg-gray-800'}`}
               >
                 <Globe size={20} />
               </button>
@@ -1611,6 +1615,7 @@ function AutoRouteBadge({ info }: { info: NonNullable<ChatMessage['autoRoute']> 
           </div>
         ) : null}
       </div>
+
     </details>
   );
 }
@@ -1634,6 +1639,12 @@ function ResearchPanel({ info }: { info: NonNullable<ChatMessage['research']> })
         ) : null}
       </summary>
       <div className="px-3 pb-2.5 pt-1 space-y-1.5">
+        {info.keywordModel && <div className="text-[11px] text-sky-300">关键词模型：{info.keywordModel}</div>}
+        {info.queries?.map(query => (
+          <div key={query.language} className="text-[11px] text-gray-400 break-words">
+            {query.language === 'zh' ? '中文检索' : query.language === 'en' ? '英文检索' : '检索词'}：{query.query}
+          </div>
+        ))}
         {steps.map((t, i) => (
           <div key={i} className="flex items-start gap-2 text-[11px]">
             <span className={`mt-1 w-1.5 h-1.5 rounded-full shrink-0 ${dot(t.status)}`} />
@@ -1652,6 +1663,34 @@ function ResearchPanel({ info }: { info: NonNullable<ChatMessage['research']> })
           </div>
         ) : null}
       </div>
+      {info.results?.length ? (
+        <div className="px-3 pb-3 space-y-2">
+          {info.results.map(result => (
+            <div key={result.id} className="rounded border border-gray-700 bg-gray-900/40 p-2 text-xs">
+              <div className="text-sky-300 mb-1">{researchChannels[result.channel] || result.channel}</div>
+              {result.url ? <a href={result.url} target="_blank" rel="noopener noreferrer" className="text-cyan-300 underline break-all">{result.title || result.url}</a>
+                : <div className="text-gray-200 font-medium">{result.title}</div>}
+              {result.published_at && <div className="text-gray-500 mt-1">发布时间：{result.published_at}</div>}
+              {result.search_query && <div className="text-gray-500 mt-1 break-words">
+                {result.query_language === 'zh' ? '中文检索词' : result.query_language === 'en' ? '英文检索词' : '检索词'}：{result.search_query}
+              </div>}
+              {result.official_candidate && <div className="text-amber-300/80 mt-1">官方资源候选，综合时核对来源</div>}
+              {result.parse_status === 'running' && <div className="text-sky-300 mt-1">正在解析网页…</div>}
+              {result.parse_status === 'success' && <div className="text-emerald-400 mt-1">
+                解析成功 · {result.parsed_chars || 0} 字符
+                {result.parse_method === 'opencli_content' ? ' · 站点帖子正文' : ' · 网页正文'}
+              </div>}
+              {result.parse_status === 'error' && <div className="text-red-400 mt-1">解析失败：{result.parse_error || '未读取到网页正文'}</div>}
+              {result.summary && <div className="mt-2"><div className="text-gray-300 mb-1">内容摘要</div>
+                <div className="text-gray-400 whitespace-pre-wrap break-words">{result.summary}</div></div>}
+              {result.kind === 'answer' ? <div className="mt-2"><MarkdownRenderer content={result.content || ''} /></div>
+                : <details className="mt-1" open={!result.content}><summary className="text-gray-400 cursor-pointer">{result.content ? '网页正文（节选）' : result.parse_status === 'error' ? '搜索摘要（未用于正文整合）' : '搜索摘要'}</summary>
+                  <div className="text-gray-400 mt-1 whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{result.content || result.snippet}</div></details>}
+              {result.kind === 'answer' && result.grounded === false && <div className="text-amber-300 mt-1">未返回完整来源，待补充搜索核对</div>}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </details>
   );
 }
