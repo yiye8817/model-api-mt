@@ -4,8 +4,8 @@
 
 ## 自动化验证
 
-- 在主工作目录运行 `PYTHONPATH=desktop-agent/src .venv/bin/python -m pytest tests desktop-agent/tests -q`：510 通过。
-- `npm run test:knowledge`：20 文件、97 测试通过。
+- 在主工作目录运行 `PYTHONPATH=desktop-agent/src .venv/bin/python -m pytest tests desktop-agent/tests -q`：517 通过。
+- `npm run test:knowledge`：20 文件、102 测试通过。
 - `npx tsc --noEmit`：通过。
 - `npm run build`：通过。
 - `npm run test:web-chat`：`electron_web_chat_dom=passed`。
@@ -24,6 +24,15 @@
 后端复现新增 10 个失败用例，前端新增 2 个失败用例；修复后全部通过，完整套件保持通过。没有延期的审查问题。
 
 合并后主目录回归额外发现失败任务先于文档恢复可重试状态发布的时序问题。新增稳定时序测试先复现失败，再将失败和取消任务及文档状态改为同一 SQLite 事务提交；相关 16 项回归和完整后端 510 项均通过。
+
+## 底部知识对话增量验证
+
+按用户确认的方案直接在 `main` 增加常驻可折叠对话窗口，复用既有文档问答和 Hermes 后端，支持知识查询、深度探索、固定资料范围的追问、历史记录、停止、引用及保存笔记。旧任务和旧回答未保存模式时继续按知识查询处理，无须迁移数据库。
+
+- 新增 7 个后端用例和 5 个前端用例，均先失败后通过。覆盖深度模式提示词及保存、无证据处理、非法模式、API 传递、切换视图与折叠保留草稿、等待轮询时禁止重复发送、范围冻结、引用与笔记、历史切换和请求清理。
+- 独立只读审查未发现 Critical、Important、Minor 问题，也无暂不判断项。
+- 隔离浏览器使用模拟 API 验证真实 React 界面的查询、探索、连续追问、笔记保存、视图切换及折叠恢复；1440×950 和 1024×700 布局均正常，运行异常为 0。本轮浏览器检查未调用真实模型，后端集成用例以替身隔离外部推理。
+- 完整后端 517 项、前端 102 项、TypeScript、生产构建、Electron web-chat 回归及差异检查均通过。
 
 ## 真实运行验证
 

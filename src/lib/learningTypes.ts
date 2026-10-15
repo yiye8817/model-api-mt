@@ -7,7 +7,8 @@ export interface LearningConcept {id:string;name:string;domain:string;descriptio
 export interface LearningRelation {id:string;source:string;target:string;type:string;citations:LearningCitation[]}
 export interface LearningAnalysis {id:string;document_id:string;revision:number;summary:string;category:string;tags:string[];tree:MindMapNode;concepts:LearningConcept[];relations:LearningRelation[];coverage:{processed:number;total:number};needs_update?:boolean}
 export type LearningScope={mode:'all'}|{mode:'selected';document_ids:string[]};
-export interface LearningTurn {id:string;question:string;answer:string;extension:string;citations:LearningCitation[];insufficient_evidence:boolean;document_revisions:Record<string,number>}
+export type LearningQuestionMode='query'|'explore';
+export interface LearningTurn {id:string;question:string;answer:string;mode?:LearningQuestionMode;extension:string;citations:LearningCitation[];insufficient_evidence:boolean;document_revisions:Record<string,number>}
 export interface LearningConversation {id:string;title:string;scope:LearningScope;document_revisions:Record<string,number>;turns:LearningTurn[];needs_update?:boolean}
 export interface LearningExploration {id:string;concept_id:string;principles:string;prerequisites:string;examples:string;pitfalls:string;related:string;questions:string[];extension:string;citations:LearningCitation[]}
 export interface LearningArchive {id:string;title:string;category:string;markdown:string;citations:LearningCitation[];documents:{id:string;title:string}[];concepts:LearningConcept[];document_revisions:Record<string,number>;needs_update?:boolean;created_at:number}

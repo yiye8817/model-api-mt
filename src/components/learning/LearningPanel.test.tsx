@@ -1,5 +1,5 @@
 import {expect,it,vi} from 'vitest';
-import {render,screen,fireEvent} from '@testing-library/react';
+import {render,screen,fireEvent,within} from '@testing-library/react';
 import LearningPanel from './LearningPanel';
 
 it('lists existing documents and opens their saved mind maps',async()=>{
@@ -53,4 +53,25 @@ it('clears the reader after removing its selected document',async()=>{
   fireEvent.click(await screen.findByRole('button',{name:'待移除资料'}));
   fireEvent.click(screen.getByRole('button',{name:'移除学习资料'}));
   expect(await screen.findByText('导入资料，开始建立你的知识库。')).toBeTruthy();
+});
+
+it('keeps the bottom knowledge dialogue across views, collapse and tab hiding',async()=>{
+  vi.stubGlobal('fetch',vi.fn(async(url)=>{
+    if(String(url).endsWith('/status'))return Response.json({documents:0,analyzed:0,concepts:0,categories:[],jobs:[],hermes:{available:true}});
+    if(String(url).includes('/graph'))return Response.json({nodes:[],edges:[],total_nodes:0,total_edges:0,coverage:{analyzed:0,total:0}});
+    return Response.json({items:[],total:0,page:1,page_size:30,errors:[]});
+  }));
+  const page=render(<LearningPanel active/>);
+  const dock=within(await screen.findByRole('region',{name:'知识对话'}));
+  fireEvent.change(dock.getByRole('textbox',{name:'向知识库提问'}),{target:{value:'深入解释知识点之间的联系'}});
+  for(const name of ['全部知识点','知识图谱','整合归档','文档学习']){
+    fireEvent.click(screen.getByRole('button',{name}));
+    expect((dock.getByRole('textbox',{name:'向知识库提问'}) as HTMLTextAreaElement).value).toBe('深入解释知识点之间的联系');
+  }
+  fireEvent.click(dock.getByRole('button',{name:'收起知识对话'}));
+  expect(dock.queryByRole('textbox',{name:'向知识库提问'})).toBeNull();
+  fireEvent.click(dock.getByRole('button',{name:'展开知识对话'}));
+  page.rerender(<LearningPanel active={false}/>);
+  page.rerender(<LearningPanel active/>);
+  expect((dock.getByRole('textbox',{name:'向知识库提问'}) as HTMLTextAreaElement).value).toBe('深入解释知识点之间的联系');
 });

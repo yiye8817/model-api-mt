@@ -45,3 +45,22 @@ def test_pagination_and_missing_objects(learning_api):
     assert client.get('/api/learning/documents/missing').status_code == 404
     assert client.get('/api/learning/jobs/missing').status_code == 404
     assert client.get('/api/learning/graph').json['coverage'] == {'total':0,'analyzed':0}
+
+
+def test_question_api_accepts_deep_conversation_and_rejects_invalid_mode(store,source,chunks):
+    from tests.learning.test_questions import build_service
+    service=build_service(store)
+    store.upsert_document(source,chunks)
+    app=Flask(__name__)
+    app.register_blueprint(create_blueprint(lambda:service))
+    client=app.test_client()
+    try:
+        response=client.post('/api/learning/questions',json={'question':'探索量子叠加','scope':{'mode':'all'},'mode':'explore'})
+        assert response.status_code==202
+        done=wait_terminal(store,response.json['job']['id'])
+        assert done['result']['turn']['mode']=='explore'
+        invalid=client.post('/api/learning/questions',json={'question':'叠加','scope':{'mode':'all'},'mode':'invalid'})
+        assert invalid.status_code==400
+        assert '模式' in invalid.json['error']
+    finally:
+        service.jobs.shutdown()

@@ -10,6 +10,7 @@ import CitationPanel from './CitationPanel';
 import ConceptExplorer from './ConceptExplorer';
 import KnowledgeGraph from './KnowledgeGraph';
 import ArchiveView from './ArchiveView';
+import LearningChatDock from './LearningChatDock';
 import {button,errorMessage} from './shared';
 
 const empty:LearningPage<LearningDocument>={items:[],total:0,page:1,page_size:30};
@@ -51,9 +52,10 @@ export default function LearningPanel({active,onOpenUrl}:{active:boolean;onOpenU
     <div className="flex min-h-0 flex-1"><aside className="flex w-64 shrink-0 flex-col border-r border-slate-800 bg-slate-900/30"><ImportSources onWatchJob={watch} onImported={onRefresh}/><LearningSidebar documents={documents} selectedId={selected?.id||null} selectedIds={selectedIds}
       onSelect={id=>{setSelected(documents.items.find(d=>d.id===id)||null);setFocusedConcept(null);setView('study');}} onToggle={id=>setSelectedIds(ids=>ids.includes(id)?ids.filter(i=>i!==id):[...ids,id])}
       query={query} onQuery={q=>{setQuery(q);setPage(1);}} category={category} onCategory={c=>{setCategory(c);setPage(1);}} categories={status?.categories||[]} page={page} onPage={setPage}/></aside>
-      <main className="flex min-w-0 flex-1 flex-col"><nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-slate-800 px-4 py-3">{views.map(v=><button key={v.id} className={`${button} whitespace-nowrap ${view===v.id?'border-emerald-800 bg-emerald-950/50 text-emerald-300':'border-transparent bg-transparent text-slate-400'}`} onClick={()=>setView(v.id)}><v.icon size={14}/>{v.name}</button>)}</nav>
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col"><nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-slate-800 px-4 py-3">{views.map(v=><button key={v.id} className={`${button} whitespace-nowrap ${view===v.id?'border-emerald-800 bg-emerald-950/50 text-emerald-300':'border-transparent bg-transparent text-slate-400'}`} onClick={()=>setView(v.id)}><v.icon size={14}/>{v.name}</button>)}</nav>
         {(error||jobError)&&<p role="alert" className="border-b border-amber-900/40 bg-amber-950/20 px-5 py-3 text-xs text-amber-300">{error||jobError}</p>}
         <div className="min-h-0 flex-1 overflow-auto p-5">{workspace}</div>
+        <LearningChatDock active={active} documentId={selected?.id} documentTitle={selected?.title} selectedIds={selectedIds} jobs={jobs} onWatchJob={watch} onOpenCitation={setCitation}/>
       </main>
     </div>
     {jobs.length>0&&<div className="max-h-32 shrink-0 overflow-auto border-t border-slate-800 bg-slate-900 px-4 py-2">{jobs.slice(0,4).map(j=><div key={j.id} className="flex items-center gap-3 py-1 text-[11px]"><span className={j.status==='failed'?'text-amber-400':j.status==='completed'?'text-emerald-400':'text-slate-400'}>{j.status==='completed'?'已完成':j.status==='failed'?'失败':j.status==='cancelled'?'已取消':j.message||'处理中'}</span>{j.total>0&&<span className="text-slate-500">{j.processed}/{j.total} 个片段</span>}<span className="min-w-0 flex-1 truncate text-amber-300">{j.error}</span>{['queued','running'].includes(j.status)&&<button aria-label="停止学习任务" className={button} onClick={()=>void cancel(j.id).catch(e=>setError(errorMessage(e)))}><Square size={11}/></button>}</div>)}</div>}

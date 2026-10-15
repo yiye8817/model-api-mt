@@ -79,7 +79,7 @@ def create_blueprint(get_service):
     def conversation(conversation_id): return jsonify(conversation=service().store.get_conversation(conversation_id))
     @bp.post('/questions')
     def question():
-        value = body(); job = service().ask(value.get('question'),value.get('scope'),value.get('conversation_id'),**options(value))
+        value = body(); job = service().ask(value.get('question'),value.get('scope'),value.get('conversation_id'),mode=value.get('mode','query'),**options(value))
         return jsonify(job=public_job(job)),202
     @bp.get('/archives')
     def archives(): return jsonify(service().archives.list_archives(filters(),*paging()))

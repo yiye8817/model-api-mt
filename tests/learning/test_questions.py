@@ -82,3 +82,63 @@ def test_malformed_followup_scope_is_rejected_as_input(store,source,chunks):
         with pytest.raises(LearningError):
             service.ask('继续',{'mode':'selected','document_ids':None},conversation_id=conversation_id)
     finally:service.jobs.shutdown()
+
+
+def test_deep_conversation_uses_scoped_evidence_and_preserves_followups(store,source,chunks):
+    prompts=[]
+    class Model(AnswerModel):
+        def request(self,prompt,*args,**kwargs):
+            prompts.append(prompt)
+            return super().request(prompt,*args,**kwargs)
+    doc=store.upsert_document(source,chunks)
+    other=store.upsert_document({**source,'source_id':'other'},[{'text':'其他资料的独有叠加观点。','position':{}}])
+    service=build_service(store,Model())
+    try:
+        scope={'mode':'selected','document_ids':[doc['id']]}
+        first=service.ask('量子叠加是什么？',scope)
+        done=wait_terminal(store,first['id'])
+        conversation_id=done['result']['conversation_id']
+        deep=service.ask('深入解释原理和误区',scope,conversation_id=conversation_id,mode='explore')
+        result=wait_terminal(store,deep['id'])
+        assert result['status']=='completed',result['error']
+        assert result['result']['conversation_id']==conversation_id
+        assert result['result']['turn']['mode']=='explore'
+        data=json.loads(prompts[-1].split('\nINPUT_JSON\n')[1])
+        assert data['mode']=='explore'
+        assert data['history'][0]['question']=='量子叠加是什么？'
+        assert {c['document_id'] for c in data['evidence']}=={doc['id']}
+        assert other['id'] not in prompts[-1]
+        assert all(part in prompts[-1].split('\nINPUT_JSON\n')[0] for part in ('前置知识','常见误区','后续问题'))
+        assert [t['mode'] for t in store.get_conversation(conversation_id)['turns']]==['query','explore']
+    finally:
+        service.jobs.shutdown()
+
+
+@pytest.mark.parametrize('mode',['unknown',None,{},True])
+def test_invalid_conversation_mode_is_rejected(store,source,chunks,mode):
+    doc=store.upsert_document(source,chunks)
+    service=build_service(store)
+    try:
+        with pytest.raises(LearningError,match='模式'):
+            service.ask('量子叠加',{'mode':'selected','document_ids':[doc['id']]},mode=mode)
+        assert store.active_jobs()==[]
+    finally:
+        service.jobs.shutdown()
+
+
+def test_deep_conversation_without_evidence_reports_insufficiency(store,source,chunks):
+    class NoModel(AnswerModel):
+        def request(self,*args,**kwargs):
+            raise AssertionError('No evidence must not trigger generation')
+    doc=store.upsert_document(source,chunks)
+    service=build_service(store,NoModel())
+    try:
+        job=service.ask('汽车维修费是多少',{'mode':'all'},mode='explore')
+        result=wait_terminal(store,job['id'])
+        assert result['status']=='completed'
+        assert result['result']['turn']['mode']=='explore'
+        assert result['result']['turn']['insufficient_evidence'] is True
+        assert result['result']['turn']['citations']==[]
+        assert result['result']['turn']['document_revisions']=={doc['id']:1}
+    finally:
+        service.jobs.shutdown()
