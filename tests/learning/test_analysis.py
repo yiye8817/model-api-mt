@@ -59,3 +59,11 @@ def test_invalid_model_evidence_or_structure_rejected(store, source, chunks, bre
     if break_kind == 'endpoint': value['relations'] = [{'source':'c','target':'missing','type':'related','citations':value['concepts'][0]['citations']}]
     with pytest.raises(LearningError):
         validate_analysis(value, evidence)
+
+
+def test_model_tree_root_array_is_normalized_without_losing_evidence(store,source,chunks):
+    doc=store.upsert_document(source,chunks);evidence=store.get_chunks(doc['id'],1)
+    value=analysis_value(evidence[0]);value['tree']=[value['tree']]
+    validated=validate_analysis(value,evidence)
+    assert validated['tree']['id']=='root'
+    assert validated['tree']['children'][0]['citations'][0]['quote']==chunks[0]['text'][:20]

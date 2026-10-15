@@ -1470,11 +1470,12 @@ def hermes_proxy_chat():
 class _HermesSession:
     """Hermes 结构化会话：最终回答走 quiet stdout，工具过程走 JSONL 事件管道。"""
 
-    def __init__(self, send_json, cwd, model=None, provider=None):
+    def __init__(self, send_json, cwd, model=None, provider=None, toolsets=None):
         self.send_json = send_json
         self.cwd = cwd if (cwd and os.path.isdir(cwd)) else WORKSPACE_DIR
         self.model = model
         self.provider = provider
+        self.toolsets = toolsets
         self.session_id = None
         self.hermes_home = None
         self.token = None
@@ -1523,6 +1524,8 @@ class _HermesSession:
             'chat', '-q', text or '', '-Q',
             '--yolo', '--accept-hooks', '--source', 'tool',
         ]
+        if self.toolsets is not None:
+            cmd += ['--toolsets', self.toolsets]
         if self.via_proxy and self.model:
             cmd += ['-m', self.model, '--provider', 'custom']
         if self.session_id:
@@ -9943,7 +9946,7 @@ def _learning_providers():
 
 _learning_runtime = _LearningRuntime(
     _KnowledgePath(DATA_DIR) / 'learning',
-    lambda **kwargs: _HermesSession(**kwargs), _learning_providers, lambda: bool(_hermes_cli_path()),
+    lambda **kwargs: _HermesSession(**kwargs, toolsets='none'), _learning_providers, lambda: bool(_hermes_cli_path()),
     lambda: _knowledge_runtime.store, _get_knowledge_store,
 )
 app.register_blueprint(_learning_blueprint(lambda: _learning_runtime.components()))

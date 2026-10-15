@@ -67,3 +67,17 @@ def test_updated_revision_fails_running_job(store, source, chunks):
         assert wait_terminal(store, job['id'])['status'] == 'failed'
     finally:
         release.set(); jobs.shutdown()
+
+
+def test_recovery_marks_interrupted_document_as_retryable(store,source,chunks):
+    doc=store.upsert_document(source,chunks)
+    store.set_document_state(doc['id'],'analyzing')
+    job=store.create_job('analysis',{'document_ids':[doc['id']]},{doc['id']:1})
+    store.update_job(job['id'],status='running')
+    jobs=LearningJobs(store)
+    try:
+        jobs.recover()
+        assert store.get_document(doc['id'])['status']=='failed'
+        assert '中断' in store.get_document(doc['id'])['last_error']
+    finally:
+        jobs.shutdown()

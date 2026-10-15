@@ -102,8 +102,8 @@ class LearningService:
                 continue
             if self.store.get_document(doc_id)['status'] == 'importing':
                 continue
-            job = self.jobs.submit('analysis',{'document_ids':[doc_id],**options},{doc_id:revision},f'analysis:{doc_id}:{revision}')
             self.store.set_document_state(doc_id,'analyzing')
+            job = self.jobs.submit('analysis',{'document_ids':[doc_id],**options},{doc_id:revision},f'analysis:{doc_id}:{revision}')
             jobs.append(job)
         if not jobs:
             raise LearningError('没有待分析资料，正在导入的资料会自动分析')
@@ -119,6 +119,10 @@ class LearningService:
 
     def ask(self, question, scope, conversation_id=None, provider_id=None, model=None):
         question = text(question, '问题')
+        if not isinstance(scope,dict) or scope.get('mode') not in ('all','selected'):
+            raise LearningError('必须明确选择提问资料范围')
+        if scope['mode']=='selected' and (not isinstance(scope.get('document_ids'),list) or not scope['document_ids'] or any(not isinstance(i,str) for i in scope['document_ids'])):
+            raise LearningError('请选择有效的文档范围')
         self.require_hermes()
         if conversation_id:
             conversation = self.store.get_conversation(conversation_id)

@@ -16,6 +16,10 @@ tree 表达章节和子主题，每个 id 唯一，知识点节点 concept_id �
 
 def validate_analysis(value, chunks):
     value = copy.deepcopy(value)
+    # Models may return a forest. Preserve every root and normalize the public tree shape.
+    if isinstance(value.get('tree'),list) and value['tree']:
+        roots=value['tree']
+        value['tree']=roots[0] if len(roots)==1 else {'id':'learning-document-root','label':'文档结构','children':roots,'citations':[]}
     text(value.get('summary'), '摘要', 40000)
     value['category'] = text(value.get('category', ''), '分类', 200, False)
     tags = value.get('tags', [])
@@ -51,7 +55,7 @@ def validate_analysis(value, chunks):
     seen = set()
     def visit(node, depth=0):
         if depth > 30 or not isinstance(node, dict):
-            raise LearningError('思维导图层级无效')
+            raise LearningError('tree 必须为包含 id、label、children 的节点对象，且深度最多 30 层')
         node_id = text(node.get('id'), '节点 ID', 200)
         if node_id in seen:
             raise LearningError('思维导图节点重复或存在环')

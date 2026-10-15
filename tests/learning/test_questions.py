@@ -65,3 +65,20 @@ def test_text_retrieval_survives_semantic_failure(store, source):
     def broken(*a): raise RuntimeError('语义模型离线')
     hits = Retriever(store,broken).search('量子叠加原理',{doc['id']:1})
     assert hits[0]['document_id'] == doc['id']
+
+
+def test_document_overview_retrieves_each_selected_source(store,source):
+    a=store.upsert_document(source,[{'text':'第一份材料介绍量子态。','position':{'kind':'lines'}}])
+    b=store.upsert_document({**source,'source_id':'b'},[{'text':'第二份材料介绍概率振幅。','position':{'kind':'lines'}}])
+    hits=Retriever(store).search('概括这两份文档的主要内容',{a['id']:1,b['id']:1})
+    assert {c['document_id'] for c in hits}=={a['id'],b['id']}
+
+
+def test_malformed_followup_scope_is_rejected_as_input(store,source,chunks):
+    doc=store.upsert_document(source,chunks);service=build_service(store)
+    try:
+        job=service.ask('什么是量子叠加',{'mode':'selected','document_ids':[doc['id']]})
+        conversation_id=wait_terminal(store,job['id'])['result']['conversation_id']
+        with pytest.raises(LearningError):
+            service.ask('继续',{'mode':'selected','document_ids':None},conversation_id=conversation_id)
+    finally:service.jobs.shutdown()

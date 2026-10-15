@@ -15,6 +15,13 @@ class Retriever:
     def search(self, question, revisions, limit=12):
         if not self.store.revisions_current(revisions):
             raise LearningError('资料已更新，请重新提问', 409)
+        if re.search(r'概括|总结|主要内容|全文|(?:文档|资料|文章).{0,8}(?:讲|内容|结构)',question):
+            groups=[];per_document=max(1,limit//max(1,len(revisions)))
+            for doc_id,revision in revisions.items():
+                chunks=[c for c in self.store.get_chunks(doc_id,revision) if c['text'].strip()]
+                count=min(per_document,len(chunks))
+                groups.append([chunks[round(i*(len(chunks)-1)/max(1,count-1))] for i in range(count)])
+            return [group[i] for i in range(per_document) for group in groups if i<len(group)][:limit]
         lexical_question = re.sub(r'是多少|是什么|多少|什么|多久|如何|怎么|是否|请问|请解释|解释一下|告诉我', ' ', question)
         terms = list(dict.fromkeys(tokens(lexical_question)))[:100]
         if not terms or not revisions:

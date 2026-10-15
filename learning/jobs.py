@@ -84,6 +84,12 @@ class LearningJobs:
             for job in self.store.active_jobs():
                 if job['status'] == 'running':
                     self.store.update_job(job['id'], status='failed', error='服务重启，中断了后台任务')
+                    if job['kind'] in ('analysis','ingest'):
+                        for doc_id in job['payload'].get('document_ids',[]):
+                            try:
+                                self.store.set_document_state(doc_id,'failed','服务重启，中断了后台任务，请重试')
+                            except LearningError:
+                                pass
                 elif job['kind'] in self.handlers:
                     self._schedule(job)
 

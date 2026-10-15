@@ -62,3 +62,18 @@ def test_closed_server_session_does_not_spawn_late_process(tmp_path, monkeypatch
     session.close()
     session._run_query(['unused'], {})
     assert spawned == []
+
+
+def test_learning_session_disables_agent_tools(tmp_path,monkeypatch):
+    import server
+    commands=[];ready=threading.Event()
+    monkeypatch.setattr(server,'_hermes_cli_path',lambda:'/fake/hermes')
+    monkeypatch.setattr(server,'_hermes_python_path',lambda cli:'python')
+    def run(self,cmd,env):
+        commands.append(cmd);self._finished.set();ready.set()
+    monkeypatch.setattr(server._HermesSession,'_run_query',run)
+    session=server._HermesSession(lambda e:None,str(tmp_path),toolsets='none')
+    session.alive=True;session.send_user('文档内容作为资料处理')
+    assert ready.wait(1)
+    cmd=commands[0]
+    assert cmd[cmd.index('--toolsets')+1]=='none'
