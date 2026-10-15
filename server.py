@@ -9928,6 +9928,27 @@ app.register_blueprint(_knowledge_blueprint(
     get_providers=lambda: load_state().get('providers', []),
 ))
 
+# Independent learning workspace; no vector model is needed for saved documents.
+from learning.runtime import LearningRuntime as _LearningRuntime
+from learning.api import create_blueprint as _learning_blueprint
+import atexit as _learning_atexit
+
+
+def _learning_providers():
+    state = load_state()
+    providers = state.get('providers', [])
+    default_id = next((p.get('id') for p in providers if p.get('isDefault')), None) or state.get('activeProviderId')
+    return [{**p, 'isDefault': p.get('id') == default_id} for p in providers]
+
+
+_learning_runtime = _LearningRuntime(
+    _KnowledgePath(DATA_DIR) / 'learning',
+    lambda **kwargs: _HermesSession(**kwargs), _learning_providers, lambda: bool(_hermes_cli_path()),
+    lambda: _knowledge_runtime.store, _get_knowledge_store,
+)
+app.register_blueprint(_learning_blueprint(lambda: _learning_runtime.components()))
+_learning_atexit.register(_learning_runtime.close)
+
 
 def _knowledge_sync_after_save(conversations):
     try:

@@ -60,6 +60,12 @@ class LearningJobs:
                 self.store.transition_job(job_id, ['running'], {'status':'completed', 'phase':'completed', 'result':result})
         except Exception as exc:
             self.store.transition_job(job_id, ['queued','running'], {'status':'cancelled' if context.cancel_event.is_set() else 'failed', 'error':str(exc)[:800]})
+            if job['kind'] in ('analysis','ingest'):
+                for doc_id in job['payload'].get('document_ids',[]):
+                    try:
+                        self.store.set_document_state(doc_id,'pending' if context.cancel_event.is_set() else 'failed',str(exc)[:800])
+                    except LearningError:
+                        pass
         finally:
             with self.lock:
                 self.events.pop(job_id, None)

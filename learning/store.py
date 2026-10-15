@@ -70,6 +70,8 @@ class LearningStore:
                     doc[key] = old[key]
                 if not changed:
                     doc['status'] = old['status']
+            elif source.get('status') == 'importing':
+                doc['status'] = 'importing'
             doc.pop('sources', None)
             db.execute('INSERT INTO documents VALUES(?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,content_hash=excluded.content_hash,body=excluded.body,deleted=0',
                        (doc_id, revision, content_hash, dumps(doc)))
@@ -94,6 +96,16 @@ class LearningStore:
                 and (not filters.get('origin') or any(s['origin'] == filters['origin'] for s in d['sources']))]
         docs.sort(key=lambda d: d['updated_at'], reverse=True)
         return paginate(docs, page, page_size)
+
+    def all_documents(self):
+        with self.connection() as db:
+            return [self._document(db,r['id']) for r in db.execute('SELECT id FROM documents WHERE deleted=0')]
+
+    def set_document_state(self, document_id, status, error=None):
+        with self.connection() as db:
+            doc = self._document(db,document_id)
+            doc.update(status=status,last_error=error)
+            db.execute('UPDATE documents SET body=? WHERE id=?',(dumps(doc),document_id))
 
     def get_chunks(self, document_id, revision):
         with self.connection() as db:
@@ -124,6 +136,12 @@ class LearningStore:
             for source in doc['sources']:
                 db.execute('INSERT OR IGNORE INTO excluded_sources VALUES(?)', (source['source_key'],))
             db.execute('UPDATE documents SET deleted=1 WHERE id=?', (document_id,))
+        for source in doc['sources']:
+            copy_path = source.get('locator',{}).get('copy_path')
+            if source['origin'] == 'learning' and copy_path:
+                path = Path(copy_path).resolve()
+                if path.is_relative_to((self.data_dir/'imports').resolve()):
+                    path.unlink(missing_ok=True)
 
     def resolve_scope(self, scope):
         if not isinstance(scope, dict) or scope.get('mode') not in ('all', 'selected'):

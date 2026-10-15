@@ -1,5 +1,7 @@
 """Learning use cases with scope-preserving question and exploration jobs."""
-from .contracts import LearningError, text
+from pathlib import Path
+import uuid
+from .contracts import LearningError, text, digest, dumps
 from .evidence import validate_citations
 from .hermes import request_json
 
@@ -22,6 +24,98 @@ class LearningService:
     def require_hermes(self):
         if not self.hermes.available()['available']:
             raise LearningError('Hermes CLI 不可用，请先配置 Hermes', 503)
+
+    def status(self):
+        documents = self.store.all_documents()
+        return {'documents':len(documents),'analyzed':len(self.store.active_analyses()),
+                'pending':sum(d['status'] != 'completed' for d in documents), 'concepts':self.graph.list_concepts({})['total'],
+                'hermes':self.hermes.available(), 'jobs':self.store.active_jobs(),
+                'categories':sorted({d['category'] for d in documents if d['category']})}
+
+    def sync(self):
+        return self.synchronizer.sync() if self.synchronizer else {'added':0,'updated':0,'removed':0,'skipped':0,'errors':[]}
+
+    def upload(self, files, options):
+        from .ingest import SUFFIXES
+        items = []
+        folder = self.store.data_dir/'imports'; folder.mkdir(exist_ok=True)
+        for filename, stream in files:
+            path = None
+            try:
+                filename = Path(filename.replace('\\','/')).name
+                if Path(filename).suffix.lower() not in SUFFIXES:
+                    raise LearningError('文件格式不支持，请上传 TXT、Markdown、PDF 或 DOCX')
+                content = stream.read(20*1024*1024+1)
+                if len(content) > 20*1024*1024:
+                    raise LearningError('单文件不能超过 20 MiB')
+                if not content:
+                    raise LearningError('文件内容不能为空')
+                source_id = uuid.uuid4().hex
+                path = folder/(source_id+Path(filename).suffix.lower())
+                path.write_bytes(content)
+                source = {'source_id':source_id,'origin':'learning','title':filename,'content_hash':'pending:'+source_id,
+                          'status':'importing','locator':{'kind':'upload','filename':filename,'copy_path':str(path)}}
+                doc = self.store.upsert_document(source,[{'text':'','position':{'kind':'lines'}}])
+                job = self.jobs.submit('ingest',{'source':source,'path':str(path),'document_ids':[doc['id']],**options},{},'ingest:'+source_id)
+                items.append({'filename':filename,'document_id':doc['id'],'job_id':job['id'],'error':None})
+            except (LearningError,OSError) as exc:
+                if path:
+                    path.unlink(missing_ok=True)
+                items.append({'filename':filename,'error':str(exc)})
+        if not items:
+            raise LearningError('请选择要上传的文件')
+        return {'items':items,'accepted':sum(bool(i.get('job_id')) for i in items),'rejected':sum(bool(i.get('error')) for i in items)}
+
+    def import_link(self, url, options):
+        from web_research.sources import public_url
+        url = public_url(text(url,'网页链接',4000))
+        if not url:
+            raise LearningError('请输入公开 HTTP 或 HTTPS 网页链接')
+        source_id = uuid.uuid4().hex
+        source = {'source_id':source_id,'origin':'learning','title':url,'content_hash':'pending:'+source_id,
+                  'status':'importing','locator':{'kind':'web','url':url}}
+        doc = self.store.upsert_document(source,[{'text':'','position':{'kind':'lines'}}])
+        job = self.jobs.submit('ingest',{'source':source,'url':url,'document_ids':[doc['id']],**options},{},'ingest:'+source_id)
+        return {'document_id':doc['id'],'job_id':job['id']}
+
+    def ingest_job(self, payload, context):
+        from .ingest import parse_upload, parse_link, make_chunks
+        context.progress('parsing',message='正在提取资料正文')
+        parsed = parse_link(payload['url'],context.cancel_event) if payload.get('url') else parse_upload(Path(payload['path']),context.cancel_event)
+        context.ensure_active()
+        source = {**payload['source'],'locator':{**payload['source']['locator'],**parsed['source']['locator']},
+                  'warnings':parsed['warnings'],'title':parsed['title'] if payload.get('url') else payload['source']['title'],
+                  'content_hash':digest(dumps(parsed['units'])),'status':'ready'}
+        doc = self.store.upsert_document(source,make_chunks(parsed['units']))
+        if doc is None:
+            raise LearningError('资料已移除，取消分析',409)
+        self.store.update_job(context.job_id,document_revisions={doc['id']:doc['revision']})
+        self.require_hermes()
+        return self.analyzer.run({'document_ids':[doc['id']],'provider_id':payload.get('provider_id'),'model':payload.get('model')},context)
+
+    def analyze(self, scope, options):
+        self.require_hermes()
+        revisions = self.store.resolve_scope(scope)
+        jobs = []
+        for doc_id, revision in revisions.items():
+            if scope['mode'] == 'all' and self.store.get_document(doc_id)['status'] == 'completed':
+                continue
+            if self.store.get_document(doc_id)['status'] == 'importing':
+                continue
+            job = self.jobs.submit('analysis',{'document_ids':[doc_id],**options},{doc_id:revision},f'analysis:{doc_id}:{revision}')
+            self.store.set_document_state(doc_id,'analyzing')
+            jobs.append(job)
+        if not jobs:
+            raise LearningError('没有待分析资料，正在导入的资料会自动分析')
+        return {**jobs[0],'job_ids':[job['id'] for job in jobs]}
+
+    def create_archive(self, scope, title='', options=None):
+        self.require_hermes()
+        revisions = self.store.resolve_scope(scope)
+        for doc_id in revisions:
+            if self.store.get_analysis(doc_id)['needs_update']:
+                raise LearningError('请先更新文档分析')
+        return self.jobs.submit('archive',{'revisions':revisions,'title':text(title,'归档标题',300,False) or '整合学习笔记',**(options or {})},revisions)
 
     def ask(self, question, scope, conversation_id=None, provider_id=None, model=None):
         question = text(question, '问题')
