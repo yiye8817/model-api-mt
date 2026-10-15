@@ -56,7 +56,7 @@ class LearningService:
                 source = {'source_id':source_id,'origin':'learning','title':filename,'content_hash':'pending:'+source_id,
                           'status':'importing','locator':{'kind':'upload','filename':filename,'copy_path':str(path)}}
                 doc = self.store.upsert_document(source,[{'text':'','position':{'kind':'lines'}}])
-                job = self.jobs.submit('ingest',{'source':source,'path':str(path),'document_ids':[doc['id']],**options},{},'ingest:'+source_id)
+                job = self.jobs.submit('ingest',{'source':source,'path':str(path),'document_ids':[doc['id']],**options},{doc['id']:doc['revision']},'ingest:'+source_id)
                 items.append({'filename':filename,'document_id':doc['id'],'job_id':job['id'],'error':None})
             except (LearningError,OSError) as exc:
                 if path:
@@ -75,21 +75,23 @@ class LearningService:
         source = {'source_id':source_id,'origin':'learning','title':url,'content_hash':'pending:'+source_id,
                   'status':'importing','locator':{'kind':'web','url':url}}
         doc = self.store.upsert_document(source,[{'text':'','position':{'kind':'lines'}}])
-        job = self.jobs.submit('ingest',{'source':source,'url':url,'document_ids':[doc['id']],**options},{},'ingest:'+source_id)
+        job = self.jobs.submit('ingest',{'source':source,'url':url,'document_ids':[doc['id']],**options},{doc['id']:doc['revision']},'ingest:'+source_id)
         return {'document_id':doc['id'],'job_id':job['id']}
 
     def ingest_job(self, payload, context):
         from .ingest import parse_upload, parse_link, make_chunks
         context.progress('parsing',message='正在提取资料正文')
         parsed = parse_link(payload['url'],context.cancel_event) if payload.get('url') else parse_upload(Path(payload['path']),context.cancel_event)
-        context.ensure_active()
         source = {**payload['source'],'locator':{**payload['source']['locator'],**parsed['source']['locator']},
                   'warnings':parsed['warnings'],'title':parsed['title'] if payload.get('url') else payload['source']['title'],
                   'content_hash':digest(dumps(parsed['units'])),'status':'ready'}
-        doc = self.store.upsert_document(source,make_chunks(parsed['units']))
-        if doc is None:
-            raise LearningError('资料已移除，取消分析',409)
-        self.store.update_job(context.job_id,document_revisions={doc['id']:doc['revision']})
+        with self.store.lock:
+            context.ensure_active()
+            doc = self.store.upsert_document(source,make_chunks(parsed['units']))
+            if doc is None:
+                raise LearningError('资料已移除，取消分析',409)
+            self.store.update_job(context.job_id,document_revisions={doc['id']:doc['revision']})
+            self.store.claim_job_documents(context.job_id)
         self.require_hermes()
         return self.analyzer.run({'document_ids':[doc['id']],'provider_id':payload.get('provider_id'),'model':payload.get('model')},context)
 
@@ -98,12 +100,24 @@ class LearningService:
         revisions = self.store.resolve_scope(scope)
         jobs = []
         for doc_id, revision in revisions.items():
-            if scope['mode'] == 'all' and self.store.get_document(doc_id)['status'] == 'completed':
+            doc = self.store.get_document(doc_id)
+            if scope['mode'] == 'all' and doc['status'] == 'completed':
                 continue
-            if self.store.get_document(doc_id)['status'] == 'importing':
+            if doc['status'] == 'importing':
                 continue
-            self.store.set_document_state(doc_id,'analyzing')
-            job = self.jobs.submit('analysis',{'document_ids':[doc_id],**options},{doc_id:revision},f'analysis:{doc_id}:{revision}')
+            if not doc.get('ingestion_complete', not doc['content_hash'].startswith('pending:')):
+                source = next((s for s in doc['sources'] if s['origin'] == 'learning'), None)
+                if not source:
+                    raise LearningError('未找到原始导入资料，请重新上传')
+                locator = source['locator']
+                payload = {'source':source,'document_ids':[doc_id],**options}
+                if locator.get('kind') == 'web':
+                    payload['url'] = locator['url']
+                else:
+                    payload['path'] = locator['copy_path']
+                job = self.jobs.submit('ingest',payload,{doc_id:revision},'ingest:'+source['source_id'])
+            else:
+                job = self.jobs.submit('analysis',{'document_ids':[doc_id],**options},{doc_id:revision},f'analysis:{doc_id}:{revision}')
             jobs.append(job)
         if not jobs:
             raise LearningError('没有待分析资料，正在导入的资料会自动分析')
@@ -168,11 +182,12 @@ class LearningService:
         return self.jobs.submit('exploration',{'concept_id':concept_id,'revisions':revisions},revisions)
 
     def explore_job(self, payload, context):
-        concept = self.graph.get_concept(payload['concept_id'])
+        context.ensure_active()
+        concept = self.graph.get_concept(payload['concept_id'], {'document_ids':list(payload['revisions'])})
         evidence = self.retriever.search(concept['name']+' '+concept['description'],payload['revisions'])
         # Include the concept's own verified excerpts even when its name is an inferred label.
         for citation in concept['citations']:
-            if citation['document_id'] in payload['revisions']:
+            if payload['revisions'].get(citation['document_id']) == citation['revision']:
                 chunk = next((c for c in self.store.get_chunks(citation['document_id'],citation['revision']) if c['id'] == citation['chunk_id']),None)
                 if chunk and all(c['id'] != chunk['id'] for c in evidence):
                     evidence.append(chunk)

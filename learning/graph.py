@@ -45,8 +45,8 @@ class GraphService:
         items = [c for c in concepts.values() if not q or q in (' '.join([c['name'],c['domain'],c['description']]+c['aliases'])).casefold()]
         return paginate(sorted(items,key=lambda c:c['name']), page, page_size)
 
-    def get_concept(self, concept_id):
-        concepts, edges, _, _, _ = self._collect({})
+    def get_concept(self, concept_id, filters=None):
+        concepts, edges, _, _, _ = self._collect(filters or {})
         if concept_id not in concepts:
             raise LearningError('知识点不存在或分析已过期', 404)
         return {**concepts[concept_id], 'relations':[e for e in edges.values() if concept_id in (e['source'],e['target'])]}

@@ -21,7 +21,11 @@ export default function ConceptExplorer({onOpenDocument,onOpenCitation,onSelectC
     if(!chosen)return;const c=new AbortController();setConcept(null);setError('');
     void learningJson<{concept:LearningConcept}>(`/concepts/${chosen}`,undefined,'GET',c.signal).then(r=>{if(!c.signal.aborted)setConcept(r.concept);}).catch(e=>{if(!c.signal.aborted)setError(errorMessage(e));});return()=>c.abort();
   },[chosen,refreshKey]);
-  const explore=async()=>{if(!concept)return;setBusy(true);setError('');try{const r=await learningJson<{job:LearningJob}>(`/concepts/${concept.id}/explore`,{});onWatchJob(r.job.id);setNotice('深入探索已开始，完成后会保存在此知识点下。');}catch(e){setError(errorMessage(e));}finally{setBusy(false);}};
+  const explore=async()=>{if(!concept)return;setBusy(true);setError('');try{
+    const ids=range==='selected'?selectedIds:range==='current'&&currentDocumentId?[currentDocumentId]:concept.document_ids;
+    if(!ids.length)throw new Error('请选择探索所用的资料');
+    const r=await learningJson<{job:LearningJob}>(`/concepts/${concept.id}/explore`,{scope:{mode:'selected',document_ids:ids}});onWatchJob(r.job.id);setNotice('深入探索已开始，完成后会保存在此知识点下。');
+  }catch(e){setError(errorMessage(e));}finally{setBusy(false);}};
   const save=async(id:string)=>{try{await learningJson('/archives/notes',{title:`${concept?.name} · 深入探索`,origin:{kind:'exploration',id}});setNotice('已保存到整合归档');}catch(e){setError(errorMessage(e));}};
   return <section className="flex h-full min-h-0 flex-col gap-4">
     <div><h3 className="text-lg font-medium">全部知识点</h3><p className="mt-1 text-xs text-slate-500">查看知识点在不同资料中的定义、出处与关联。</p></div>

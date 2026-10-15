@@ -54,9 +54,11 @@ class LearningStore:
                 return None
             previous = db.execute('SELECT document_id FROM document_sources WHERE source_id=?', (source_key,)).fetchone()
             doc_id = previous['document_id'] if previous else digest(source_key)[:32]
-            old = self._document(db, doc_id, True) if previous else None
+            exists = db.execute('SELECT 1 FROM documents WHERE id=?', (doc_id,)).fetchone()
+            old = self._document(db, doc_id, True) if exists else None
             revision = old['revision'] if old else 0
-            changed = not old or old['content_hash'] != content_hash
+            source_stale = source.get('status') == 'stale'
+            changed = not old or old['content_hash'] != content_hash or bool(old.get('source_stale')) != source_stale
             if changed:
                 revision += 1
             manual = old.get('manual', []) if old else []
@@ -64,6 +66,7 @@ class LearningStore:
                    'category': (old or {}).get('category', ''), 'tags': (old or {}).get('tags', []),
                    'manual': manual, 'status': 'needs_update' if old and old.get('analysis_id') and changed else 'pending',
                    'analysis_id': (old or {}).get('analysis_id'), 'warnings': source.get('warnings', []),
+                   'source_stale': source_stale, 'ingestion_complete': not content_hash.startswith('pending:'),
                    'updated_at': now(), 'created_at': (old or {}).get('created_at', now())}
             if old:
                 for key in manual:
@@ -72,6 +75,9 @@ class LearningStore:
                     doc['status'] = old['status']
             elif source.get('status') == 'importing':
                 doc['status'] = 'importing'
+            if source_stale:
+                doc['status'] = 'needs_update'
+                doc['warnings'] = [*doc['warnings'], '来源资料已失效，请先在原资料库中更新后同步。']
             doc.pop('sources', None)
             db.execute('INSERT INTO documents VALUES(?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,content_hash=excluded.content_hash,body=excluded.body,deleted=0',
                        (doc_id, revision, content_hash, dumps(doc)))
@@ -152,7 +158,14 @@ class LearningStore:
         with self.connection() as db:
             if scope['mode'] == 'all':
                 ids = [r['id'] for r in db.execute('SELECT id FROM documents WHERE deleted=0')]
-            result = {i: self._document(db, i)['revision'] for i in ids}
+            result = {}
+            for i in ids:
+                doc = self._document(db, i)
+                if doc.get('source_stale'):
+                    if scope['mode'] == 'selected':
+                        raise LearningError('来源资料已失效，请先更新原资料后同步', 409)
+                    continue
+                result[i] = doc['revision']
         if not result:
             raise LearningError('还没有可用资料')
         return result
@@ -160,8 +173,8 @@ class LearningStore:
     def revisions_current(self, revisions):
         with self.connection() as db:
             for doc_id, revision in revisions.items():
-                row = db.execute('SELECT revision,deleted FROM documents WHERE id=?', (doc_id,)).fetchone()
-                if not row or row['deleted'] or row['revision'] != revision:
+                row = db.execute('SELECT revision,deleted,body FROM documents WHERE id=?', (doc_id,)).fetchone()
+                if not row or row['deleted'] or row['revision'] != revision or json.loads(row['body']).get('source_stale'):
                     return False
         return True
 
@@ -171,7 +184,39 @@ class LearningStore:
                'message':'等待处理', 'error':None, 'result':None, 'created_at':now(), 'updated_at':now()}
         with self.connection() as db:
             db.execute('INSERT INTO jobs VALUES(?,?,?)', (job['id'], job['status'], dumps(job)))
+            self._claim_job_documents(db, job)
         return job
+
+    def _claim_job_documents(self, db, job):
+        if job['kind'] not in ('analysis', 'ingest'):
+            return
+        for doc_id in job['payload'].get('document_ids', []):
+            doc = self._document(db, doc_id)
+            if job['document_revisions'].get(doc_id) == doc['revision'] and not doc.get('source_stale'):
+                doc.update(processing_job_id=job['id'], last_error=None,
+                           status='importing' if job['kind'] == 'ingest' and not doc.get('ingestion_complete', True) else 'analyzing')
+                db.execute('UPDATE documents SET body=? WHERE id=?', (dumps(doc), doc_id))
+
+    def claim_job_documents(self, job_id):
+        with self.connection() as db:
+            self._claim_job_documents(db, self.get_job(job_id))
+
+    def finish_job_documents(self, job_id, cancelled, error):
+        """Release only this job's current revision and processing ownership."""
+        with self.connection() as db:
+            job = self.get_job(job_id)
+            if job['kind'] not in ('analysis', 'ingest'):
+                return
+            for doc_id, revision in job['document_revisions'].items():
+                row = db.execute('SELECT revision,deleted,body FROM documents WHERE id=?', (doc_id,)).fetchone()
+                if not row or row['deleted'] or row['revision'] != revision:
+                    continue
+                doc = json.loads(row['body'])
+                if doc.get('processing_job_id') != job_id or doc['status'] not in ('analyzing', 'importing'):
+                    continue
+                doc.update(status='pending' if cancelled else 'failed', last_error=error)
+                doc.pop('processing_job_id', None)
+                db.execute('UPDATE documents SET body=? WHERE id=?', (dumps(doc), doc_id))
 
     def get_job(self, job_id):
         with self.connection() as db:
@@ -207,8 +252,8 @@ class LearningStore:
             if not row or row['status'] != 'running':
                 raise LearningError('任务已取消', 409)
         for doc_id, revision in revisions.items():
-            row = db.execute('SELECT revision,deleted FROM documents WHERE id=?', (doc_id,)).fetchone()
-            if not row or row['deleted'] or row['revision'] != revision:
+            row = db.execute('SELECT revision,deleted,body FROM documents WHERE id=?', (doc_id,)).fetchone()
+            if not row or row['deleted'] or row['revision'] != revision or json.loads(row['body']).get('source_stale'):
                 raise LearningError('资料已更新或移除', 409)
 
     def commit_analysis(self, document_id, revision, analysis, job_id):
@@ -248,6 +293,7 @@ class LearningStore:
                 if field not in doc.get('manual', []):
                     doc[field] = value[field]
             doc.update(analysis_id=value['id'], status='completed', updated_at=now())
+            doc.pop('processing_job_id', None)
             db.execute('UPDATE documents SET body=? WHERE id=?', (dumps(doc),document_id))
         return value
 
@@ -261,12 +307,12 @@ class LearningStore:
             if not row:
                 raise LearningError('文档尚未生成分析与思维导图', 404)
             value = json.loads(row['body'])
-            value['needs_update'] = value['revision'] != doc['revision']
+            value['needs_update'] = value['revision'] != doc['revision'] or doc.get('source_stale', False)
             return value
 
     def active_analyses(self):
         with self.connection() as db:
-            return [json.loads(r['body']) for r in db.execute('SELECT a.body FROM analyses a JOIN documents d ON a.document_id=d.id AND a.revision=d.revision WHERE d.deleted=0 AND json_extract(d.body,\'$.analysis_id\')=a.id')]
+            return [json.loads(r['body']) for r in db.execute('SELECT a.body FROM analyses a JOIN documents d ON a.document_id=d.id AND a.revision=d.revision WHERE d.deleted=0 AND COALESCE(json_extract(d.body,\'$.source_stale\'),0)=0 AND json_extract(d.body,\'$.analysis_id\')=a.id')]
 
     def save_turn(self, conversation_id, question, answer, scope, revisions, job_id):
         with self.connection() as db:

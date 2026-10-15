@@ -44,15 +44,15 @@ class LearningJobs:
             return job
 
     def _schedule(self, job):
-        self.events[job['id']] = threading.Event()
-        self.futures[job['id']] = self.executor.submit(self._run, job['id'])
+        event = self.events[job['id']] = threading.Event()
+        self.futures[job['id']] = self.executor.submit(self._run, job['id'], event)
 
-    def _run(self, job_id):
-        if not self.store.transition_job(job_id, ['queued'], {'status': 'running'}):
-            return
-        context = JobContext(self, job_id, self.events[job_id])
-        job = self.store.get_job(job_id)
+    def _run(self, job_id, event):
+        context = JobContext(self, job_id, event)
         try:
+            if not self.store.transition_job(job_id, ['queued'], {'status': 'running'}):
+                return
+            job = self.store.get_job(job_id)
             context.ensure_active()
             result = self.handlers[job['kind']](job['payload'], context)
             with self.store.lock:
@@ -60,12 +60,7 @@ class LearningJobs:
                 self.store.transition_job(job_id, ['running'], {'status':'completed', 'phase':'completed', 'result':result})
         except Exception as exc:
             self.store.transition_job(job_id, ['queued','running'], {'status':'cancelled' if context.cancel_event.is_set() else 'failed', 'error':str(exc)[:800]})
-            if job['kind'] in ('analysis','ingest'):
-                for doc_id in job['payload'].get('document_ids',[]):
-                    try:
-                        self.store.set_document_state(doc_id,'pending' if context.cancel_event.is_set() else 'failed',str(exc)[:800])
-                    except LearningError:
-                        pass
+            self.store.finish_job_documents(job_id, context.cancel_event.is_set(), str(exc)[:800])
         finally:
             with self.lock:
                 self.events.pop(job_id, None)
@@ -76,7 +71,12 @@ class LearningJobs:
             event = self.events.get(job_id)
             if event:
                 event.set()
-            self.store.transition_job(job_id, ['queued','running'], {'status':'cancelled', 'phase':'cancelled', 'message':'任务已取消'})
+            if self.store.transition_job(job_id, ['queued','running'], {'status':'cancelled', 'phase':'cancelled', 'message':'任务已取消'}):
+                self.store.finish_job_documents(job_id, True, '任务已取消，可重新发起')
+                future = self.futures.get(job_id)
+                if future and future.cancel():
+                    self.events.pop(job_id, None)
+                    self.futures.pop(job_id, None)
         return self.store.get_job(job_id)
 
     def recover(self):
@@ -84,12 +84,7 @@ class LearningJobs:
             for job in self.store.active_jobs():
                 if job['status'] == 'running':
                     self.store.update_job(job['id'], status='failed', error='服务重启，中断了后台任务')
-                    if job['kind'] in ('analysis','ingest'):
-                        for doc_id in job['payload'].get('document_ids',[]):
-                            try:
-                                self.store.set_document_state(doc_id,'failed','服务重启，中断了后台任务，请重试')
-                            except LearningError:
-                                pass
+                    self.store.finish_job_documents(job['id'], False, '服务重启，中断了后台任务，请重试')
                 elif job['kind'] in self.handlers:
                     self._schedule(job)
 

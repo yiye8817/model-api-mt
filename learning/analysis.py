@@ -83,6 +83,8 @@ class DocumentAnalyzer:
         for doc_id in payload['document_ids']:
             context.ensure_active()
             doc = self.store.get_document(doc_id)
+            if not doc.get('ingestion_complete', True):
+                raise LearningError('资料正文尚未导入，请重试文件解析或网页抓取')
             chunks = self.store.get_chunks(doc_id, doc['revision'])
             batches, batch, size = [], [], 0
             for chunk in chunks:
