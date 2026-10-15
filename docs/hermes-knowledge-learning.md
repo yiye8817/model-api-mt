@@ -59,7 +59,7 @@ Hermes CLI 必须已安装并可运行。默认使用应用默认 provider 及�
 自动化测试使用临时目录及 Hermes 会话替身，覆盖实际解析、SQLite、后台任务和 HTTP 完整流程。运行：
 
 ```bash
-PYTHONPATH=desktop-agent/src .venv/bin/python -m pytest
+PYTHONPATH=desktop-agent/src .venv/bin/python -m pytest tests desktop-agent/tests
 npm run test:knowledge
 npx tsc --noEmit
 npm run build

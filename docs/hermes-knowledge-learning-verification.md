@@ -1,10 +1,10 @@
 # 知识学习实现验证记录
 
-实现位于独立工作区，基于 `fa1754c`，功能提交为 `149916f` 至 `c3568a6`，最终审查修复提交为 `8f81aeb`。未自动合入 main。
+实现基于 `fa1754c`，功能提交为 `149916f` 至 `c3568a6`，最终审查修复提交为 `8f81aeb`。已通过 [PR #1](https://github.com/yiye8817/model-api-mt/pull/1) 合入 `main`，合并提交为 `67e1797`。用户已要求后续直接在 `main` 开发，约定记录在仓库根目录的 `AGENTS.md`。
 
 ## 自动化验证
 
-- `PYTHONPATH=desktop-agent/src .venv/bin/python -m pytest -q`：509 通过。
+- 在主工作目录运行 `PYTHONPATH=desktop-agent/src .venv/bin/python -m pytest tests desktop-agent/tests -q`：510 通过。
 - `npm run test:knowledge`：20 文件、97 测试通过。
 - `npx tsc --noEmit`：通过。
 - `npm run build`：通过。
@@ -22,6 +22,8 @@
 7. 轮询结束后移除终态任务 ID，稳定排序、限制历史并保留全部活动任务。
 
 后端复现新增 10 个失败用例，前端新增 2 个失败用例；修复后全部通过，完整套件保持通过。没有延期的审查问题。
+
+合并后主目录回归额外发现失败任务先于文档恢复可重试状态发布的时序问题。新增稳定时序测试先复现失败，再将失败和取消任务及文档状态改为同一 SQLite 事务提交；相关 16 项回归和完整后端 510 项均通过。
 
 ## 真实运行验证
 

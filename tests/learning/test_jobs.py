@@ -81,3 +81,29 @@ def test_recovery_marks_interrupted_document_as_retryable(store,source,chunks):
         assert '中断' in store.get_document(doc['id'])['last_error']
     finally:
         jobs.shutdown()
+
+
+def test_failed_job_is_visible_only_after_document_becomes_retryable(store,source,chunks,monkeypatch):
+    doc=store.upsert_document({**source,'content_hash':'pending:retry','status':'importing'},chunks)
+    published,release=threading.Event(),threading.Event()
+    transition=store.transition_job
+    def pause_after_failure(job_id,expected,patch):
+        changed=transition(job_id,expected,patch)
+        if changed and patch.get('status')=='failed':
+            published.set()
+            release.wait(3)
+        return changed
+    monkeypatch.setattr(store,'transition_job',pause_after_failure)
+    jobs=LearningJobs(store)
+    def fail(payload,context):
+        raise RuntimeError('temporary parser failure')
+    jobs.register('ingest',fail)
+    try:
+        job=jobs.submit('ingest',{'document_ids':[doc['id']]},{doc['id']:doc['revision']})
+        assert published.wait(1)
+        assert store.get_job(job['id'])['status']=='failed'
+        assert store.get_document(doc['id'])['status']=='failed'
+        assert 'parser failure' in store.get_document(doc['id'])['last_error']
+    finally:
+        release.set()
+        jobs.shutdown()

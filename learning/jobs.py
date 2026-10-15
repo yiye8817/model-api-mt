@@ -60,7 +60,6 @@ class LearningJobs:
                 self.store.transition_job(job_id, ['running'], {'status':'completed', 'phase':'completed', 'result':result})
         except Exception as exc:
             self.store.transition_job(job_id, ['queued','running'], {'status':'cancelled' if context.cancel_event.is_set() else 'failed', 'error':str(exc)[:800]})
-            self.store.finish_job_documents(job_id, context.cancel_event.is_set(), str(exc)[:800])
         finally:
             with self.lock:
                 self.events.pop(job_id, None)
@@ -72,7 +71,6 @@ class LearningJobs:
             if event:
                 event.set()
             if self.store.transition_job(job_id, ['queued','running'], {'status':'cancelled', 'phase':'cancelled', 'message':'任务已取消'}):
-                self.store.finish_job_documents(job_id, True, '任务已取消，可重新发起')
                 future = self.futures.get(job_id)
                 if future and future.cancel():
                     self.events.pop(job_id, None)
@@ -83,8 +81,7 @@ class LearningJobs:
         with self.lock:
             for job in self.store.active_jobs():
                 if job['status'] == 'running':
-                    self.store.update_job(job['id'], status='failed', error='服务重启，中断了后台任务')
-                    self.store.finish_job_documents(job['id'], False, '服务重启，中断了后台任务，请重试')
+                    self.store.transition_job(job['id'], ['running'], {'status':'failed', 'error':'服务重启，中断了后台任务，请重试'})
                 elif job['kind'] in self.handlers:
                     self._schedule(job)
 

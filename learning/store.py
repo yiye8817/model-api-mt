@@ -201,22 +201,21 @@ class LearningStore:
         with self.connection() as db:
             self._claim_job_documents(db, self.get_job(job_id))
 
-    def finish_job_documents(self, job_id, cancelled, error):
+    def _finish_job_documents(self, db, job):
         """Release only this job's current revision and processing ownership."""
-        with self.connection() as db:
-            job = self.get_job(job_id)
-            if job['kind'] not in ('analysis', 'ingest'):
-                return
-            for doc_id, revision in job['document_revisions'].items():
-                row = db.execute('SELECT revision,deleted,body FROM documents WHERE id=?', (doc_id,)).fetchone()
-                if not row or row['deleted'] or row['revision'] != revision:
-                    continue
-                doc = json.loads(row['body'])
-                if doc.get('processing_job_id') != job_id or doc['status'] not in ('analyzing', 'importing'):
-                    continue
-                doc.update(status='pending' if cancelled else 'failed', last_error=error)
-                doc.pop('processing_job_id', None)
-                db.execute('UPDATE documents SET body=? WHERE id=?', (dumps(doc), doc_id))
+        if job['kind'] not in ('analysis', 'ingest'):
+            return
+        for doc_id, revision in job['document_revisions'].items():
+            row = db.execute('SELECT revision,deleted,body FROM documents WHERE id=?', (doc_id,)).fetchone()
+            if not row or row['deleted'] or row['revision'] != revision:
+                continue
+            doc = json.loads(row['body'])
+            if doc.get('processing_job_id') != job['id'] or doc['status'] not in ('analyzing', 'importing'):
+                continue
+            doc.update(status='pending' if job['status']=='cancelled' else 'failed',
+                       last_error=job.get('error') or job.get('message'))
+            doc.pop('processing_job_id', None)
+            db.execute('UPDATE documents SET body=? WHERE id=?', (dumps(doc), doc_id))
 
     def get_job(self, job_id):
         with self.connection() as db:
@@ -239,11 +238,18 @@ class LearningStore:
             return job
 
     def transition_job(self, job_id, expected, patch):
-        with self.lock:
-            job = self.get_job(job_id)
+        with self.connection() as db:
+            row = db.execute('SELECT body FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                raise LearningError('任务不存在', 404)
+            job = json.loads(row['body'])
             if job['status'] not in expected:
                 return False
-            self.update_job(job_id, **patch)
+            job.update(**patch, updated_at=now())
+            db.execute('UPDATE jobs SET status=?,body=? WHERE id=?', (job['status'], dumps(job), job_id))
+            # A terminal job and its retryable document state become visible together.
+            if job['status'] in ('failed', 'cancelled'):
+                self._finish_job_documents(db, job)
             return True
 
     def assert_publishable(self, db, job_id, revisions):
