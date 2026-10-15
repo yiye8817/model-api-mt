@@ -49,7 +49,7 @@ def _clean(text):
     return '\n'.join(re.sub(r'\s+', ' ', line).strip() for line in text.splitlines() if line.strip()).strip()
 
 
-def _extract(document):
+def extract_article(document, max_chars=18000):
     html = document.get('html') or ''
     if not html:
         return _clean(document.get('text') or ''), document.get('title') or '', 'text'
@@ -57,7 +57,11 @@ def _extract(document):
     parser.feed(html)
     primary, body = _clean(''.join(parser.primary)), _clean(''.join(parser.body))
     text, method = (primary, 'html_article') if len(primary) >= 40 else (body, 'html_text')
-    return text[:18000], ''.join(parser.title).strip() or document.get('title') or '', method
+    return text[:max_chars], ''.join(parser.title).strip() or document.get('title') or '', method
+
+
+def _extract(document):
+    return extract_article(document)
 
 
 def summarize(text, data, maximum=1200):

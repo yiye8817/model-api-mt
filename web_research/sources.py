@@ -106,7 +106,7 @@ def fetch_page(url, cancel, max_chars=2500):
         parser.feed(html)
         text = re.sub(r'\s+', ' ', ' '.join(parser.text)).strip()[:max_chars]
         return {'url': current, 'title': ''.join(parser.title).strip()[:300], 'text': text,
-                'html': html, 'published_at': parser.published_at}
+                'html': html, 'published_at': parser.published_at, 'truncated': len(body) >= 512000}
     raise SearchFailure('PAGE_UNAVAILABLE', '网页重定向次数过多')
 
 

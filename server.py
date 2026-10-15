@@ -1470,11 +1470,12 @@ def hermes_proxy_chat():
 class _HermesSession:
     """Hermes 结构化会话：最终回答走 quiet stdout，工具过程走 JSONL 事件管道。"""
 
-    def __init__(self, send_json, cwd, model=None, provider=None):
+    def __init__(self, send_json, cwd, model=None, provider=None, toolsets=None):
         self.send_json = send_json
         self.cwd = cwd if (cwd and os.path.isdir(cwd)) else WORKSPACE_DIR
         self.model = model
         self.provider = provider
+        self.toolsets = toolsets
         self.session_id = None
         self.hermes_home = None
         self.token = None
@@ -1484,6 +1485,8 @@ class _HermesSession:
         self._lock = threading.Lock()
         self._running = False
         self._proc = None
+        self._finished = threading.Event()
+        self._finished.set()
 
     def start(self):
         cli = _hermes_cli_path()
@@ -1521,6 +1524,8 @@ class _HermesSession:
             'chat', '-q', text or '', '-Q',
             '--yolo', '--accept-hooks', '--source', 'tool',
         ]
+        if self.toolsets is not None:
+            cmd += ['--toolsets', self.toolsets]
         if self.via_proxy and self.model:
             cmd += ['-m', self.model, '--provider', 'custom']
         if self.session_id:
@@ -1531,6 +1536,7 @@ class _HermesSession:
                 self.send_json({"type": "error", "error": "上一条消息仍在处理中"})
                 return
             self._running = True
+            self._finished.clear()
         threading.Thread(target=self._run_query, args=(cmd, env), daemon=True).start()
 
     @staticmethod
@@ -1622,15 +1628,20 @@ class _HermesSession:
         event_r = event_w = None
         event_thread = None
         try:
+            if not self.alive:
+                return
             event_r, event_w = os.pipe()
             env = dict(env)
             env['HERMES_EVENT_FD'] = str(event_w)
-            proc = subprocess.Popen(
-                cmd, cwd=self.cwd, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, pass_fds=(event_w,),
-            )
-            self._proc = proc
+            with self._lock:
+                if not self.alive:
+                    return
+                proc = subprocess.Popen(
+                    cmd, cwd=self.cwd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, pass_fds=(event_w,),
+                )
+                self._proc = proc
             os.close(event_w)
             event_w = None
 
@@ -1702,16 +1713,22 @@ class _HermesSession:
                     pass
             with self._lock:
                 self._running = False
+            self._finished.set()
             self.send_json({'type': 'done'})
 
     def close(self, cleanup_only=False):
-        self.alive = False
-        proc = self._proc
+        with self._lock:
+            self.alive = False
+            proc = self._proc
         if proc and proc.poll() is None:
             try:
                 proc.terminate()
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
             except Exception:
                 pass
+        self._finished.wait(timeout=5)
         if self.token:
             _unregister_claude_provider(self.token)
             self.token = None
@@ -9913,6 +9930,27 @@ app.register_blueprint(_knowledge_blueprint(
     runtime=lambda: _knowledge_runtime,
     get_providers=lambda: load_state().get('providers', []),
 ))
+
+# Independent learning workspace; no vector model is needed for saved documents.
+from learning.runtime import LearningRuntime as _LearningRuntime
+from learning.api import create_blueprint as _learning_blueprint
+import atexit as _learning_atexit
+
+
+def _learning_providers():
+    state = load_state()
+    providers = state.get('providers', [])
+    default_id = next((p.get('id') for p in providers if p.get('isDefault')), None) or state.get('activeProviderId')
+    return [{**p, 'isDefault': p.get('id') == default_id} for p in providers]
+
+
+_learning_runtime = _LearningRuntime(
+    _KnowledgePath(DATA_DIR) / 'learning',
+    lambda **kwargs: _HermesSession(**kwargs, toolsets='none'), _learning_providers, lambda: bool(_hermes_cli_path()),
+    lambda: _knowledge_runtime.store, _get_knowledge_store,
+)
+app.register_blueprint(_learning_blueprint(lambda: _learning_runtime.components()))
+_learning_atexit.register(_learning_runtime.close)
 
 
 def _knowledge_sync_after_save(conversations):

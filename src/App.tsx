@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import ClaudeChat from './components/ClaudeChat';
 import HermesChat from './components/HermesChat';
+import LearningPanel from './components/learning/LearningPanel';
 import ConfigModal from './components/ConfigModal';
 import TerminalDock from './components/TerminalDock';
 import LocalHubModal from './components/LocalHubModal';
@@ -47,7 +48,7 @@ import type {
 } from './types';
 import {
   Loader2, ServerOff, Server, Plus, X as XIcon, Sparkles, MessageSquare,
-  FileText, FolderTree, ChevronLeft, PanelRightClose, PanelRightOpen,
+  FileText, FolderTree, ChevronLeft, PanelRightClose, PanelRightOpen, BookOpen,
   Terminal as TerminalIcon, ChevronRight, Bot, Globe, Trash2, ExternalLink, Hammer,
 } from 'lucide-react';
 
@@ -137,7 +138,7 @@ export default function App() {
   // ===== 中部多 Tab：默认 Claude Code 工作台 + 原有 Provider 对话 + 文件查看 + 交互式终端 =====
   type CenterTab = {
     id: string;
-    kind: 'claude' | 'claude-term' | 'hermes' | 'hermes-term' | 'desktop-agent' | 'codex-term' | 'provider' | 'file' | 'web';
+    kind: 'claude' | 'claude-term' | 'hermes' | 'hermes-term' | 'desktop-agent' | 'codex-term' | 'provider' | 'file' | 'web' | 'learning';
     title: string;
     path?: string;
     url?: string;
@@ -145,6 +146,7 @@ export default function App() {
   const [centerTabs, setCenterTabs] = useState<CenterTab[]>([
     { id: 'claude-1', kind: 'claude', title: 'Claude Code' },
     { id: 'provider', kind: 'provider', title: '对话' },
+    { id: 'knowledge-learning', kind: 'learning', title: '知识学习' },
   ]);
   const [activeCenterTab, setActiveCenterTab] = useState('claude-1');
   const [claudeMeta, setClaudeMeta] = useState<{ available: boolean; defaultCwd: string; repoDir: string; version: string }>(
@@ -2067,6 +2069,11 @@ export default function App() {
               return (
                 <div
                   key={tab.id}
+                  role="tab"
+                  aria-label={tab.title}
+                  aria-selected={isActive}
+                  tabIndex={0}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveCenterTab(tab.id); } }}
                   onClick={() => setActiveCenterTab(tab.id)}
                   title={tab.url || tab.path || tab.title}
                   className={`group flex items-center gap-1.5 px-3 h-7 rounded-t cursor-pointer text-xs shrink-0 border-b-2 ${
@@ -2081,6 +2088,7 @@ export default function App() {
                     : tab.kind === 'codex-term' ? <TerminalIcon size={12} className="text-cyan-300 shrink-0" />
                     : tab.kind === 'file' ? <FileText size={12} className="text-sky-400 shrink-0" />
                     : tab.kind === 'web' ? <Globe size={12} className="text-amber-400 shrink-0" />
+                    : tab.kind === 'learning' ? <BookOpen size={12} className="text-emerald-400 shrink-0" />
                     : <MessageSquare size={12} className="shrink-0" />}
                   <span className="whitespace-nowrap max-w-[160px] truncate">{tab.title}</span>
                   {closable && (
@@ -2170,6 +2178,9 @@ export default function App() {
           {/* 中部 Tab 内容 */}
           <div className="flex-1 min-h-0 relative">
             {/* Provider 对话（保持挂载以保留状态） */}
+            <div className={`absolute inset-0 ${activeCenterTab === 'knowledge-learning' ? '' : 'hidden'}`}>
+              <LearningPanel active={activeCenterTab === 'knowledge-learning'} onOpenUrl={openWebTab} />
+            </div>
             <div className={`absolute inset-0 flex flex-col ${activeCenterTab === 'provider' ? '' : 'hidden'}`}>
               <ChatArea
                 conversation={activeConversation}
@@ -2530,6 +2541,7 @@ export default function App() {
           </button>
           <div className="my-1 border-t border-gray-700" />
           <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">Hermes</div>
+          <button onMouseDown={(e) => { e.preventDefault(); setActiveCenterTab('knowledge-learning'); setShowAddMenu(false); }} className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-gray-200 hover:bg-gray-700"><BookOpen size={13} className="text-emerald-400" /> 知识学习</button>
           <button
             onMouseDown={(e) => { e.preventDefault(); addHermesTab(); setShowAddMenu(false); }}
             className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-gray-200 hover:bg-gray-700"

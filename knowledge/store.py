@@ -244,6 +244,24 @@ class KnowledgeStore:
                    'ON CONFLICT(entry_id,provider_id,model) DO UPDATE SET dimension=excluded.dimension,vector=excluded.vector,updated_at=excluded.updated_at',
                    (entry_id, provider_id, model, len(vector), payload, now()))
 
+    def document_snapshots(self):
+        """Read complete imported-document groups without invoking any model."""
+        with self.connection() as db:
+            rows = db.execute("SELECT data FROM entries WHERE dataset LIKE 'document:%' AND origin='manual'").fetchall()
+        groups = {}
+        for row in rows:
+            entry = json.loads(row['data'])
+            groups.setdefault(entry['dataset'], []).append(entry)
+        result = []
+        for dataset, entries in groups.items():
+            entries.sort(key=lambda e: int(e['id'].rsplit(':', 1)[-1]))
+            first = entries[0]
+            chunks = [{'text': e['answer'], 'ordinal': index, 'position': {'kind': 'stored_chunk', 'chunk_index': index+1}} for index, e in enumerate(entries)]
+            result.append({'source_id': dataset, 'origin': 'content_library', 'title': first.get('source_name') or first.get('title') or dataset,
+                'content_hash': digest(json.dumps(chunks, ensure_ascii=False)), 'external_revision': 1, 'status': 'ready',
+                'locator': {'kind': 'stored_chunks', 'dataset': dataset, 'url': first.get('source_url', '')}, 'chunks': chunks})
+        return result
+
     def get(self, entry_id):
         with self.connection() as db:
             row = db.execute('SELECT e.*,a.data annotation,a.updated_at annotated_at FROM entries e '
