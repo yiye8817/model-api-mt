@@ -1,8 +1,10 @@
 """Document parsing runs in an independent, bounded worker."""
 import codecs
 import multiprocessing
+import re
 import time
 import zipfile
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 
@@ -26,19 +28,32 @@ def _parse_worker(sender,path,limits,encoding):
         path=Path(path)
         if path.suffix.lower()=='.pdf':
             from pypdf import PdfReader
+            from pypdf.errors import PdfReadError
             reader=PdfReader(path)
             if reader.is_encrypted: raise ParseError('encrypted_pdf')
-            units=[]; offset=0
+            units=[]; offset=0; warnings=[]
             for page_no,page in enumerate(reader.pages,1):
                 contents=page.get_contents()
                 if contents is not None and len(contents.get_data())>limits.max_pdf_page_bytes:
                     raise ParseError('pdf_page_expanded_limit')
+                # Layout extraction does not support every native PDF text form.
+                # Keep the ordinary extraction whenever layout fails or loses text.
                 text=page.extract_text() or ''
+                if offset+len(text)>limits.max_text_chars: raise ParseError('expanded_text_limit')
+                if contents is not None:
+                    try:
+                        layout=page.extract_text(extraction_mode='layout',layout_mode_strip_rotated=False,layout_mode_space_vertically=False) or ''
+                    except (KeyError,ValueError,TypeError,NotImplementedError,PdfReadError):
+                        layout=''
+                    if not (Counter(c for c in text if not c.isspace())-Counter(c for c in layout if not c.isspace())):
+                        text=layout
+                if sum(bool(re.search(r'\S {3,}\S',line)) for line in text.splitlines()) >= 2:
+                    warnings.append(f'第 {page_no} 页含表格或分栏，已保留排版；行列对应关系请对照原页核对。')
                 units.append(TextUnit(text,Position(kind='pdf_page',page=page_no,start_char=offset,end_char=offset+len(text))))
                 offset+=len(text)+1
                 if offset>limits.max_text_chars: raise ParseError('expanded_text_limit')
             if not any(u.text.strip() for u in units): raise ParseError('scanned_or_empty_pdf')
-            result=ParsedDocument(units,warnings=['pdf_tables_require_verified_structure'])
+            result=ParsedDocument(units,warnings=warnings)
         elif path.suffix.lower()=='.docx':
             with zipfile.ZipFile(path) as archive:
                 if sum(i.file_size for i in archive.infolist())>limits.max_pdf_page_bytes:

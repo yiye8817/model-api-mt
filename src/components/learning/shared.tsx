@@ -2,6 +2,9 @@ import type {LearningCitation} from '../../lib/learningTypes';
 export const button='inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 hover:border-emerald-600 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed';
 export const input='min-w-0 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 outline-none focus:border-emerald-500';
 export function errorMessage(e:unknown){return e instanceof Error?e.message:'操作失败，请重试';}
+export function documentWarningMessage(message:string){
+  return message==='pdf_tables_require_verified_structure'?'PDF 已按页提取文字；如含表格，行列对应关系请对照原页核对。':message;
+}
 export function positionLabel(p:Record<string,unknown>){
   if(p.page)return `第 ${p.page} 页`;
   if(p.paragraph)return `第 ${p.paragraph} 段`;
