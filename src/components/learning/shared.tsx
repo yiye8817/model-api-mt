@@ -6,6 +6,7 @@ export function documentWarningMessage(message:string){
   return message==='pdf_tables_require_verified_structure'?'PDF 已按页提取文字；如含表格，行列对应关系请对照原页核对。':message;
 }
 export function positionLabel(p:Record<string,unknown>){
+  if(p.page&&p.kind==='pdf_ocr')return `第 ${p.page} 页 · OCR 行 ${p.start_line||1}–${p.end_line||p.start_line||1}`;
   if(p.page)return `第 ${p.page} 页`;
   if(p.paragraph)return `第 ${p.paragraph} 段`;
   if(p.table)return `表格 ${p.table} · 行 ${p.row||1}`;

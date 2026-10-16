@@ -8,27 +8,57 @@ from local_knowledge.text import text_units
 from web_research.sources import fetch_page, public_url
 from web_research.pages import extract_article
 from .contracts import LearningError, digest, now
+from .ocr import recognize_pdf, validate_pages, page_units, MAX_TEXT
 
 SUFFIXES = {'.txt', '.md', '.markdown', '.pdf', '.docx'}
 
 
-def parse_upload(path, cancel):
+def parse_upload(path, cancel, hermes=None, progress=None, options=None):
     path = Path(path)
     if path.suffix.lower() not in SUFFIXES:
         raise LearningError('支持的文件格式为 TXT、Markdown、PDF 和 DOCX')
     if path.stat().st_size > 20*1024*1024:
         raise LearningError('单文件不能超过 20 MiB')
     try:
-        parsed = parse_file(path, cancel_event=cancel)
+        parsed = parse_file(path, cancel_event=cancel, allow_scan_placeholders=path.suffix.lower()=='.pdf')
     except ParseError as exc:
-        messages = {'scanned_or_empty_pdf': 'PDF 没有可提取文字，扫描件需先转成文字', 'encrypted_pdf': '无法读取加密 PDF',
+        messages = {'scanned_or_empty_pdf': 'PDF 没有正文或可识别的扫描图像', 'encrypted_pdf': '无法读取加密 PDF',
                     'empty_document': '文档没有正文', 'unsupported_encoding': '请上传 UTF-8 编码文本', 'cancelled': '任务已取消'}
         reason = str(exc)
         if 'No module named' in reason:
             reason = '缺少 PDF 或 DOCX 解析依赖，请安装 requirements-knowledge.txt'
         raise LearningError(messages.get(reason, '文档解析失败：'+reason)) from exc
-    return {'title': path.name, 'units': [asdict(u) for u in parsed.units], 'warnings': parsed.warnings,
-            'source': {'origin': 'learning', 'locator': {'kind': 'upload', 'filename': path.name}}}
+    units=[asdict(u) for u in parsed.units]
+    scans=[u.position.page for u in parsed.units if u.kind=='scan']
+    if scans:
+        recognized=validate_pages(recognize_pdf(path,scans,cancel,hermes=hermes,progress=progress,options=options),scans)
+        by_page={page['page']:page for page in recognized}
+        expanded=[]
+        for unit in units:
+            if unit['kind']!='scan':
+                expanded.append(unit);continue
+            recognized_units=page_units(by_page[unit['position']['page']])
+            native=''.join(unit['text'].split())
+            if not recognized_units or native and native not in ''.join(''.join(part['text'].split()) for part in recognized_units):
+                expanded.append({**unit,'kind':'paragraph'})
+            expanded.extend(recognized_units)
+        units=expanded
+        offset=0
+        for unit in units:
+            unit['position'].update(start_char=offset,end_char=offset+len(unit['text']))
+            offset+=len(unit['text'])+1
+            if offset>MAX_TEXT:raise LearningError('OCR 后文档文字超过解析上限')
+        if not any(unit['text'].strip() for unit in units):
+            raise LearningError('OCR 未识别到可用文字，请检查扫描清晰度')
+        if any(page['lines'] for page in recognized):
+            parsed.warnings.append('扫描页已通过 OCR 转为文字，保留页码和文字位置；识别结果请对照原页核对。')
+        for page in recognized:
+            if not page['lines']:
+                parsed.warnings.append(f'第 {page["page"]} 页 OCR 未识别到文字，可能为空白扫描页，请对照原页核对。')
+    if cancel.is_set():raise LearningError('任务已取消')
+    return {'title': path.name, 'units': units, 'warnings': parsed.warnings,
+            'source': {'origin': 'learning', 'locator': {'kind': 'upload', 'filename': path.name,
+                **({'pdf_ocr_version':1} if path.suffix.lower()=='.pdf' else {})}}}
 
 
 def parse_link(url, cancel):

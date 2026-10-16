@@ -77,3 +77,52 @@ def test_learning_session_disables_agent_tools(tmp_path,monkeypatch):
     assert ready.wait(1)
     cmd=commands[0]
     assert cmd[cmd.index('--toolsets')+1]=='none'
+
+
+def test_ocr_session_uses_a_process_group_and_stops_it(tmp_path,monkeypatch):
+    import server
+    commands=[];stopped=[]
+    class Process:
+        pid=987654
+        returncode=0
+        def communicate(self,**kwargs):return '',''
+        def poll(self):return None
+        def wait(self,**kwargs):return 0
+        def terminate(self):pass
+    def spawn(*args,**kwargs):commands.append(kwargs);return Process()
+    monkeypatch.setattr(server.subprocess,'Popen',spawn)
+    monkeypatch.setattr(server.os,'killpg',lambda pid,sig:stopped.append(pid))
+    session=server._HermesSession(lambda event:None,str(tmp_path),toolsets='terminal,file')
+    session.alive=True
+    session._run_query(['ocr'],{})
+    session._proc=Process();session.close(cleanup_only=True)
+    assert commands[0].get('start_new_session') is True
+    assert 987654 in stopped
+
+
+def test_cancel_stops_detached_ocr_terminal_descendants(tmp_path):
+    import os,signal,subprocess,sys,time
+    from pathlib import Path
+    import server
+    marker=tmp_path/'child-pid'
+    program='import subprocess,sys,time; from pathlib import Path; child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(20)"],start_new_session=True); Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(20)'
+    process=subprocess.Popen([sys.executable,'-c',program,str(marker)],start_new_session=True)
+    child=None
+    try:
+        deadline=time.monotonic()+2
+        while not marker.exists() and time.monotonic()<deadline:time.sleep(.01)
+        assert marker.exists();child=int(marker.read_text())
+        session=server._HermesSession(lambda event:None,str(tmp_path),toolsets='terminal,file')
+        session._proc=process;session.close(cleanup_only=True)
+        deadline=time.monotonic()+1
+        def alive(pid):
+            try:return (Path('/proc')/str(pid)/'stat').read_text().rsplit(')',1)[1].split()[0]!='Z'
+            except FileNotFoundError:return False
+        while alive(child) and time.monotonic()<deadline:time.sleep(.01)
+        assert not alive(child),'Detached OCR command survived cancellation'
+    finally:
+        for pid in (child,process.pid):
+            if pid:
+                try:os.kill(pid,signal.SIGKILL)
+                except ProcessLookupError:pass
+        process.wait(timeout=2)

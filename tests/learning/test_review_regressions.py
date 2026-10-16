@@ -77,7 +77,7 @@ def test_obsolete_job_cleanup_cannot_overwrite_success(store, source, chunks, re
 def test_import_retry_runs_original_ingestion(tmp_path, monkeypatch, web):
     from learning import ingest
     calls = []
-    def parse(*args):
+    def parse(*args,**kwargs):
         calls.append(args[0])
         if len(calls) == 1:
             raise LearningError('temporary parse/fetch failure')

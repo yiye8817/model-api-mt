@@ -18,7 +18,45 @@ class ParseError(RuntimeError):
     pass
 
 
-def _parse_worker(sender,path,limits,encoding):
+def _pdf_images(page,limits):
+    """Measure image coverage through graphics transforms and nested Form resources."""
+    from pypdf.generic import ContentStream
+    threshold=float(page.mediabox.width*page.mediabox.height)*.5
+    budget=0;has_images=False
+    def determinant(matrix):return abs(float(matrix[0])*float(matrix[3])-float(matrix[1])*float(matrix[2]))
+    def walk(stream,resources,scale,ancestors):
+        nonlocal budget,has_images
+        if stream is None:return False
+        budget+=len(stream.get_data())
+        if budget>limits.max_pdf_page_bytes:raise ParseError('pdf_page_expanded_limit')
+        if len(ancestors)>16:raise ParseError('pdf_nested_content_limit')
+        if hasattr(resources,'get_object'):resources=resources.get_object()
+        objects=resources.get('/XObject',{})
+        if hasattr(objects,'get_object'):objects=objects.get_object()
+        stack=[]
+        for args,operator in ContentStream(stream,page.pdf).operations:
+            if operator==b'q':stack.append(scale)
+            elif operator==b'Q':scale=stack.pop() if stack else scale
+            elif operator==b'cm':scale*=determinant(args)
+            elif operator==b'INLINE IMAGE':
+                has_images=True
+                if scale>=threshold:return True
+            elif operator==b'Do' and args:
+                obj=objects.get(args[0])
+                if obj is None:continue
+                obj=obj.get_object()
+                if obj.get('/Subtype')=='/Image':
+                    has_images=True
+                    if scale>=threshold:return True
+                if obj.get('/Subtype')=='/Form' and id(obj) not in ancestors:
+                    factor=determinant(obj.get('/Matrix',[1,0,0,1,0,0]))
+                    if walk(obj,obj.get('/Resources',resources),scale*factor,ancestors|{id(obj)}):return True
+        return False
+    large=walk(page.get_contents(),page.get('/Resources',{}),1,set())
+    return large,has_images
+
+
+def _parse_worker(sender,path,limits,encoding,allow_scan_placeholders=False):
     try:
         try:
             import resource
@@ -49,10 +87,12 @@ def _parse_worker(sender,path,limits,encoding):
                         text=layout
                 if sum(bool(re.search(r'\S {3,}\S',line)) for line in text.splitlines()) >= 2:
                     warnings.append(f'第 {page_no} 页含表格或分栏，已保留排版；行列对应关系请对照原页核对。')
-                units.append(TextUnit(text,Position(kind='pdf_page',page=page_no,start_char=offset,end_char=offset+len(text))))
+                large,images=_pdf_images(page,limits) if allow_scan_placeholders else (False,False)
+                scan=allow_scan_placeholders and (large or len(''.join(text.split()))<80 and images)
+                units.append(TextUnit(text,Position(kind='pdf_page',page=page_no,start_char=offset,end_char=offset+len(text)), 'scan' if scan else 'paragraph'))
                 offset+=len(text)+1
                 if offset>limits.max_text_chars: raise ParseError('expanded_text_limit')
-            if not any(u.text.strip() for u in units): raise ParseError('scanned_or_empty_pdf')
+            if not any(u.text.strip() or u.kind=='scan' for u in units): raise ParseError('scanned_or_empty_pdf')
             result=ParsedDocument(units,warnings=warnings)
         elif path.suffix.lower()=='.docx':
             with zipfile.ZipFile(path) as archive:
@@ -89,19 +129,19 @@ def _parse_worker(sender,path,limits,encoding):
             if '\0' in text: raise ParseError('binary_content')
             result=ParsedDocument(text_units(text))
         if sum(len(u.text) for u in result.units)>limits.max_text_chars: raise ParseError('expanded_text_limit')
-        if not any(u.text.strip() for u in result.units): raise ParseError('empty_document')
+        if not any(u.text.strip() or u.kind=='scan' for u in result.units): raise ParseError('empty_document')
         sender.send((True,asdict(result)))
     except Exception as exc:
         sender.send((False,str(exc)[:300]))
     finally: sender.close()
 
 
-def parse_file(path,limits=None,encoding=None,cancel_event=None):
+def parse_file(path,limits=None,encoding=None,cancel_event=None,allow_scan_placeholders=False):
     limits=limits or ParseLimits(); path=Path(path)
     if path.stat().st_size>limits.max_file_bytes: raise ParseError('file_too_large')
     if path.suffix.lower() not in TEXT_SUFFIXES|{'.pdf','.docx'}: raise ParseError('unsupported_extension')
     ctx=multiprocessing.get_context('spawn'); receiver,sender=ctx.Pipe(duplex=False)
-    worker=ctx.Process(target=_parse_worker,args=(sender,str(path),limits,encoding),daemon=True)
+    worker=ctx.Process(target=_parse_worker,args=(sender,str(path),limits,encoding,allow_scan_placeholders),daemon=True)
     deadline=time.monotonic()+limits.timeout_seconds
     worker.start(); sender.close()
     try:

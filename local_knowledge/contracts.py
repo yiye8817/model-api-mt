@@ -21,6 +21,7 @@ class Position:
     row: int | None = None
     column: int | None = None
     message_id: str | None = None
+    bbox: list[float] | None = None
 
 
 @dataclass

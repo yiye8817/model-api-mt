@@ -86,7 +86,10 @@ class LearningService:
     def ingest_job(self, payload, context):
         from .ingest import parse_upload, parse_link, make_chunks
         context.progress('parsing',message='正在提取资料正文')
-        parsed = parse_link(payload['url'],context.cancel_event) if payload.get('url') else parse_upload(Path(payload['path']),context.cancel_event)
+        parsed = parse_link(payload['url'],context.cancel_event) if payload.get('url') else parse_upload(
+            Path(payload['path']),context.cancel_event,hermes=self.hermes,
+            progress=lambda message:context.progress('ocr',message=message),
+            options={key:payload.get(key) for key in ('provider_id','model')})
         source = {**payload['source'],'locator':{**payload['source']['locator'],**parsed['source']['locator']},
                   'warnings':parsed['warnings'],'title':parsed['title'] if payload.get('url') else payload['source']['title'],
                   'content_hash':digest(dumps(parsed['units'])),'status':'ready'}
@@ -110,11 +113,12 @@ class LearningService:
                 continue
             if doc['status'] == 'importing':
                 continue
-            if not doc.get('ingestion_complete', not doc['content_hash'].startswith('pending:')):
-                source = next((s for s in doc['sources'] if s['origin'] == 'learning'), None)
+            source = next((s for s in doc['sources'] if s['origin'] == 'learning'), None)
+            locator = source['locator'] if source else {}
+            old_pdf = locator.get('kind')=='upload' and Path(locator.get('copy_path','')).suffix.lower()=='.pdf' and locator.get('pdf_ocr_version')!=1
+            if not doc.get('ingestion_complete', not doc['content_hash'].startswith('pending:')) or old_pdf:
                 if not source:
                     raise LearningError('未找到原始导入资料，请重新上传')
-                locator = source['locator']
                 payload = {'source':source,'document_ids':[doc_id],**options}
                 if locator.get('kind') == 'web':
                     payload['url'] = locator['url']

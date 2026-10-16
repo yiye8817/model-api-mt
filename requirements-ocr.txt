@@ -1,0 +1,4 @@
+# Optional local Chinese/English PDF OCR. Models ship with RapidOCR's wheel.
+rapidocr-onnxruntime>=1.4.4,<2
+pypdfium2>=4.30,<6
+Pillow>=10,<13

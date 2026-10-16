@@ -1485,6 +1485,7 @@ class _HermesSession:
         self._lock = threading.Lock()
         self._running = False
         self._proc = None
+        self._query_descendants = {}
         self._finished = threading.Event()
         self._finished.set()
 
@@ -1627,6 +1628,7 @@ class _HermesSession:
     def _run_query(self, cmd, env):
         event_r = event_w = None
         event_thread = None
+        proc = None
         try:
             if not self.alive:
                 return
@@ -1640,8 +1642,10 @@ class _HermesSession:
                     cmd, cwd=self.cwd, env=env,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, pass_fds=(event_w,),
+                    start_new_session=self.toolsets not in (None,'none'),
                 )
                 self._proc = proc
+                self._query_descendants = {}
             os.close(event_w)
             event_w = None
 
@@ -1665,7 +1669,7 @@ class _HermesSession:
             try:
                 out, err = proc.communicate(timeout=900)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                self._stop_query_process(proc,force=True)
                 out, err = proc.communicate()
                 err = (err or '') + '\nHermes 响应超时（900 秒）'
 
@@ -1700,6 +1704,8 @@ class _HermesSession:
             self.send_json({'type': 'error', 'error': str(e)})
             logger.exception('Hermes 结构化会话执行失败')
         finally:
+            if proc and self.toolsets not in (None,'none'):
+                self._stop_query_process(proc,force=True)
             self._proc = None
             if event_w is not None:
                 try:
@@ -1716,16 +1722,30 @@ class _HermesSession:
             self._finished.set()
             self.send_json({'type': 'done'})
 
+    def _stop_query_process(self, proc, force=False):
+        if self.toolsets not in (None,'none'):
+            from hermes_processes import stop_descendants
+            self._query_descendants=stop_descendants(proc.pid,signal.SIGKILL if force else signal.SIGTERM,self._query_descendants)
+            try:
+                os.killpg(proc.pid,signal.SIGKILL if force else signal.SIGTERM)
+                return
+            except ProcessLookupError:
+                return
+        if force:
+            proc.kill()
+        else:
+            proc.terminate()
+
     def close(self, cleanup_only=False):
         with self._lock:
             self.alive = False
             proc = self._proc
         if proc and proc.poll() is None:
             try:
-                proc.terminate()
+                self._stop_query_process(proc)
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                self._stop_query_process(proc,force=True)
             except Exception:
                 pass
         self._finished.wait(timeout=5)
@@ -9946,7 +9966,7 @@ def _learning_providers():
 
 _learning_runtime = _LearningRuntime(
     _KnowledgePath(DATA_DIR) / 'learning',
-    lambda **kwargs: _HermesSession(**kwargs, toolsets='none'), _learning_providers, lambda: bool(_hermes_cli_path()),
+    lambda **kwargs: _HermesSession(**{'toolsets':'none',**kwargs}), _learning_providers, _hermes_cli_path,
     lambda: _knowledge_runtime.store, _get_knowledge_store,
 )
 app.register_blueprint(_learning_blueprint(lambda: _learning_runtime.components()))

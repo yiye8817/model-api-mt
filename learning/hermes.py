@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import time
 import json
+import threading
 
 from .contracts import LearningError
 
@@ -62,12 +63,23 @@ class HermesClient:
     def __init__(self, session_factory, get_providers, cli_available, work_dir):
         self.session_factory, self.get_providers = session_factory, get_providers
         self.cli_available, self.work_dir = cli_available, Path(work_dir)
+        self.ocr_lock = threading.Lock()
+        self.ocr_execution_lock = threading.Lock()
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     def available(self):
         return {'available': bool(self.cli_available()), 'engine': 'Hermes'}
 
-    def request(self, prompt, cancel, progress, provider_id=None, model=None, timeout=900):
+    def ocr_pdf(self,path,pages,cancel,progress,provider_id=None,model=None):
+        from .hermes_ocr import ocr_with_skill
+        while not self.ocr_execution_lock.acquire(timeout=.1):
+            if cancel.is_set():raise LearningError('任务已取消')
+        try:
+            if cancel.is_set():raise LearningError('任务已取消')
+            return ocr_with_skill(self,path,pages,cancel,progress,provider_id,model)
+        finally:self.ocr_execution_lock.release()
+
+    def request(self, prompt, cancel, progress, provider_id=None, model=None, timeout=900, cwd=None, toolsets=None):
         if cancel.is_set():
             raise LearningError('任务已取消')
         if not self.available()['available']:
@@ -79,10 +91,12 @@ class HermesClient:
         if provider:
             provider = {**provider, 'model': model or provider.get('selectedModel') or provider.get('model') or next(iter(provider.get('models', [])), None)}
         events = queue.Queue()
-        cwd = tempfile.mkdtemp(prefix='job-', dir=self.work_dir)
+        owned_cwd = cwd is None
+        cwd = cwd or tempfile.mkdtemp(prefix='job-', dir=self.work_dir)
         session = None
         try:
-            session = self.session_factory(send_json=events.put, cwd=cwd, provider=provider, model=model)
+            extra = {'toolsets':toolsets} if toolsets is not None else {}
+            session = self.session_factory(send_json=events.put, cwd=str(cwd), provider=provider, model=model, **extra)
             if not session.start():
                 raise LearningError('Hermes 会话启动失败', 503)
             session.send_user(prompt)
@@ -112,4 +126,5 @@ class HermesClient:
         finally:
             if session:
                 session.close(cleanup_only=True)
-            shutil.rmtree(cwd, ignore_errors=True)
+            if owned_cwd:
+                shutil.rmtree(cwd, ignore_errors=True)
